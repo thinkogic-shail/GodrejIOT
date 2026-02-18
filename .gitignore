@@ -1,0 +1,22 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VS Code
+.vscode/*
+!.vscode/extensions.json
+
+# Build artifacts
+*.bin
+*.elf
+*.map
+*.o
+*.obj
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
