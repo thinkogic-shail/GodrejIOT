@@ -6,4 +6,5 @@ namespace WiFiManager {
   void ensureConnected();
   bool isConnected();
   String ipString();
+  bool hasCredentials();
 }

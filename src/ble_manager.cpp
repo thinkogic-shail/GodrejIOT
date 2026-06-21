@@ -51,8 +51,10 @@ static void handleSetWiFi(const String& cmd) {
   Serial.print("BLE SET_WIFI SSID: ");
   Serial.println(ssid);
 
-  // Save to NVS
-  Storage::saveWiFi(ssid, pass);
+  if (!Storage::saveWiFi(ssid, pass)) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"WiFi save failed\"}");
+    return;
+  }
 
   BLEManager::notifyText("{\"ok\":true,\"msg\":\"WiFi saved. Rebooting\"}");
 
@@ -112,7 +114,15 @@ class RxCB : public NimBLECharacteristicCallbacks {
 namespace BLEManager {
 
 void begin(const String& deviceName) {
+  Serial.println("BLE init: releasing classic BT memory");
+  esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+
+  delay(100);
+  Serial.println("BLE init: NimBLEDevice::init");
   NimBLEDevice::init(deviceName.c_str());
+  NimBLEDevice::setPower(ESP_PWR_LVL_N12);
+
+  Serial.println("BLE init: creating server");
   NimBLEServer* server = NimBLEDevice::createServer();
   server->setCallbacks(new ServerCB());
 
@@ -155,9 +165,10 @@ scanResp.setName(deviceName.c_str());   // 🔑 Name in scan response
 adv->setAdvertisementData(advData);
 adv->setScanResponseData(scanResp);
 
-adv->start();
+  Serial.println("BLE init: starting advertising");
+  adv->start();
 
-Serial.println("BLE advertising started (adv + scan response)");
+  Serial.println("BLE advertising started (adv + scan response)");
 
 
 }

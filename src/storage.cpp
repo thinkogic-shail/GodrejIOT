@@ -2,118 +2,160 @@
 #include <Preferences.h>
 
 static Preferences prefs;
+static constexpr uint16_t STORAGE_SCHEMA_VERSION = 1;
+static constexpr const char* KEY_SCHEMA = "schema";
+
+static bool writeString(const char* key, const String& value) {
+  return prefs.putString(key, value) == value.length();
+}
 
 namespace Storage {
 
-    void begin(const char* ns) {
-    prefs.begin(ns, false); // read/write
+bool begin(const char* ns) {
+  if (!prefs.begin(ns, false)) {
+    Serial.println("Storage begin failed");
+    return false;
+  }
+
+  uint16_t storedVersion = prefs.getUShort(KEY_SCHEMA, 0);
+  if (storedVersion == 0) {
+    if (prefs.putUShort(KEY_SCHEMA, STORAGE_SCHEMA_VERSION) != sizeof(uint16_t)) {
+      Serial.println("Storage schema initialization failed");
+      return false;
     }
-
-    bool saveUniqueCode(const String& uniqueCode) {
-    return prefs.putString("unique", uniqueCode) > 0;
-    }
-
-    bool loadUniqueCode(String& outUniqueCode) {
-    outUniqueCode = prefs.getString("unique", "");
-    return outUniqueCode.length() > 0;
-    }
-
-    bool saveMachineInfo(const MachineInfo& info) {
-    // Save only what you need long-term
-    prefs.putBool("valid", info.valid);
-    prefs.putInt("mid", info.MachineId);
-    prefs.putInt("cid", info.CompanyId);
-    prefs.putInt("lid", info.LocationId);
-    prefs.putInt("ssid", info.ScreenSaverId);
-    prefs.putInt("msi", info.MachineStatusInterval);
-    prefs.putInt("mri", info.MachineReadCounterInterval);
-
-    prefs.putString("ecode", info.ErrorCode);
-    prefs.putString("emsg", info.ErrorMessage);
-    prefs.putString("rtype", info.RequestType);
-
-    prefs.putString("mname", info.MachineName);
-    prefs.putString("cname", info.CompanyName);
-    prefs.putString("lname", info.LocationName);
-
-    prefs.putString("model", info.ModelNo);
-    prefs.putString("serial", info.SerialNo);
-    prefs.putString("asset", info.AssetNo);
-    prefs.putString("sw", info.SoftwareVersion);
-    prefs.putString("inst", info.InstallationDate);
-
-    prefs.putString("video", info.VideoURL);
-
     return true;
+  }
+
+  if (storedVersion != STORAGE_SCHEMA_VERSION) {
+    Serial.print("Storage schema mismatch. Stored=");
+    Serial.print(storedVersion);
+    Serial.print(" Current=");
+    Serial.println(STORAGE_SCHEMA_VERSION);
+
+    bool cleared = prefs.clear();
+    bool versionWritten = prefs.putUShort(KEY_SCHEMA, STORAGE_SCHEMA_VERSION) == sizeof(uint16_t);
+    if (!cleared || !versionWritten) {
+      Serial.println("Storage schema reset failed");
+      return false;
     }
+  }
 
-    bool loadMachineInfo(MachineInfo& outInfo) {
-    bool valid = prefs.getBool("valid", false);
-    int mid = prefs.getInt("mid", 0);
+  return true;
+}
 
-    if (!valid || mid <= 0) return false;
+bool saveUniqueCode(const String& uniqueCode) {
+  return writeString("unique", uniqueCode);
+}
 
-    outInfo.valid = valid;
-    outInfo.MachineId = mid;
-    outInfo.CompanyId = prefs.getInt("cid", 0);
-    outInfo.LocationId = prefs.getInt("lid", 0);
-    outInfo.ScreenSaverId = prefs.getInt("ssid", 0);
-    outInfo.MachineStatusInterval = prefs.getInt("msi", 0);
-    outInfo.MachineReadCounterInterval = prefs.getInt("mri", 0);
+bool loadUniqueCode(String& outUniqueCode) {
+  outUniqueCode = prefs.getString("unique", "");
+  return outUniqueCode.length() > 0;
+}
 
-    outInfo.ErrorCode = prefs.getString("ecode", "");
-    outInfo.ErrorMessage = prefs.getString("emsg", "");
-    outInfo.RequestType = prefs.getString("rtype", "");
+bool saveMachineInfo(const MachineInfo& info) {
+  bool ok = true;
+  ok &= prefs.putBool("valid", info.valid) == 1;
+  ok &= prefs.putInt("mid", info.MachineId) == sizeof(int);
+  ok &= prefs.putInt("cid", info.CompanyId) == sizeof(int);
+  ok &= prefs.putInt("lid", info.LocationId) == sizeof(int);
+  ok &= prefs.putInt("ssid", info.ScreenSaverId) == sizeof(int);
+  ok &= prefs.putInt("msi", info.MachineStatusInterval) == sizeof(int);
+  ok &= prefs.putInt("mri", info.MachineReadCounterInterval) == sizeof(int);
 
-    outInfo.MachineName = prefs.getString("mname", "");
-    outInfo.CompanyName = prefs.getString("cname", "");
-    outInfo.LocationName = prefs.getString("lname", "");
+  ok &= writeString("ecode", info.ErrorCode);
+  ok &= writeString("emsg", info.ErrorMessage);
+  ok &= writeString("rtype", info.RequestType);
+  ok &= writeString("mname", info.MachineName);
+  ok &= writeString("cname", info.CompanyName);
+  ok &= writeString("lname", info.LocationName);
+  ok &= writeString("model", info.ModelNo);
+  ok &= writeString("serial", info.SerialNo);
+  ok &= writeString("asset", info.AssetNo);
+  ok &= writeString("sw", info.SoftwareVersion);
+  ok &= writeString("inst", info.InstallationDate);
+  ok &= writeString("video", info.VideoURL);
 
-    outInfo.ModelNo = prefs.getString("model", "");
-    outInfo.SerialNo = prefs.getString("serial", "");
-    outInfo.AssetNo = prefs.getString("asset", "");
-    outInfo.SoftwareVersion = prefs.getString("sw", "");
-    outInfo.InstallationDate = prefs.getString("inst", "");
+  if (!ok) {
+    Serial.println("Storage saveMachineInfo failed");
+  }
+  return ok;
+}
 
-    outInfo.VideoURL = prefs.getString("video", "");
+bool loadMachineInfo(MachineInfo& outInfo) {
+  bool valid = prefs.getBool("valid", false);
+  int mid = prefs.getInt("mid", 0);
 
-    return true;
-    }
+  if (!valid || mid <= 0) return false;
 
-    void clearAll() {
-    prefs.clear();
-    }
+  outInfo.valid = valid;
+  outInfo.MachineId = mid;
+  outInfo.CompanyId = prefs.getInt("cid", 0);
+  outInfo.LocationId = prefs.getInt("lid", 0);
+  outInfo.ScreenSaverId = prefs.getInt("ssid", 0);
+  outInfo.MachineStatusInterval = prefs.getInt("msi", 0);
+  outInfo.MachineReadCounterInterval = prefs.getInt("mri", 0);
 
-    bool isProvisioned() {
-    bool valid = prefs.getBool("valid", false);
-    int mid = prefs.getInt("mid", 0);
-    return valid && mid > 0;
-    }
+  outInfo.ErrorCode = prefs.getString("ecode", "");
+  outInfo.ErrorMessage = prefs.getString("emsg", "");
+  outInfo.RequestType = prefs.getString("rtype", "");
+  outInfo.MachineName = prefs.getString("mname", "");
+  outInfo.CompanyName = prefs.getString("cname", "");
+  outInfo.LocationName = prefs.getString("lname", "");
+  outInfo.ModelNo = prefs.getString("model", "");
+  outInfo.SerialNo = prefs.getString("serial", "");
+  outInfo.AssetNo = prefs.getString("asset", "");
+  outInfo.SoftwareVersion = prefs.getString("sw", "");
+  outInfo.InstallationDate = prefs.getString("inst", "");
+  outInfo.VideoURL = prefs.getString("video", "");
 
-    void factoryReset(bool reboot) {
-        Serial.println("⚠️ FACTORY RESET STARTED");
-        Serial.println("Clearing NVS storage...");
-        prefs.clear();
-        Serial.println("✅ NVS cleared successfully");
+  return true;
+}
 
-        if (reboot) {
-            Serial.println("🔁 Rebooting device...");
-            delay(500);
-            ESP.restart();
-        }
-    }
-    
-    void saveWiFi(const String& ssid, const String& pass) {
-        prefs.putString("wifi_ssid", ssid);
-        prefs.putString("wifi_pass", pass);
-        }
+bool clearAll() {
+  bool cleared = prefs.clear();
+  bool versionWritten = prefs.putUShort(KEY_SCHEMA, STORAGE_SCHEMA_VERSION) == sizeof(uint16_t);
+  return cleared && versionWritten;
+}
 
-    bool loadWiFi(String& outSsid, String& outPass) {
-        outSsid = prefs.getString("wifi_ssid", "");
-        outPass = prefs.getString("wifi_pass", "");
+bool isProvisioned() {
+  bool valid = prefs.getBool("valid", false);
+  int mid = prefs.getInt("mid", 0);
+  return valid && mid > 0;
+}
 
-        // valid only if SSID exists
-        return outSsid.length() > 0;
-    }
+void factoryReset(bool reboot) {
+  Serial.println("FACTORY RESET STARTED");
+  Serial.println("Clearing NVS storage...");
+  bool ok = clearAll();
+  Serial.println(ok ? "NVS cleared successfully" : "NVS clear failed");
+
+  if (reboot) {
+    Serial.println("Rebooting device...");
+    delay(500);
+    ESP.restart();
+  }
+}
+
+bool saveWiFi(const String& ssid, const String& pass) {
+  bool ok = writeString("wifi_ssid", ssid);
+  ok &= writeString("wifi_pass", pass);
+  if (!ok) {
+    Serial.println("Storage saveWiFi failed");
+  }
+  return ok;
+}
+
+bool loadWiFi(String& outSsid, String& outPass) {
+  size_t ssidLen = prefs.getString("wifi_ssid", nullptr, 0);
+  if (ssidLen == 0) {
+    outSsid = "";
+    outPass = "";
+    return false;
+  }
+
+  outSsid = prefs.getString("wifi_ssid", "");
+  outPass = prefs.getString("wifi_pass", "");
+  return true;
+}
 
 } // namespace

@@ -21,6 +21,11 @@ void begin(int pin, bool activeLow) {
   g_pin = pin;
   g_activeLow = activeLow;
 
+  if (g_pin < 0) {
+    Serial.println("ButtonManager disabled");
+    return;
+  }
+
   pinMode(g_pin, g_activeLow ? INPUT_PULLUP : INPUT_PULLDOWN);
 
   g_last = readPressed();

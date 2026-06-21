@@ -9,6 +9,10 @@ static String g_uniqueCode;
 
 static String g_getInfoTopic;
 static bool g_wildcard = false;
+static uint32_t g_lastConnectAttemptAt = 0;
+static int g_lastConnectState = INT32_MIN;
+
+static constexpr uint32_t MQTT_RETRY_INTERVAL_MS = 5000;
 
 static void onMessage(char* topic, byte* payload, unsigned int len) {
   String topicStr = topic;
@@ -20,24 +24,25 @@ static void onMessage(char* topic, byte* payload, unsigned int len) {
   Serial.println("\n========== MQTT CALLBACK ==========");
   Serial.print("Topic: "); Serial.println(topicStr);
   Serial.print("Payload: "); Serial.println(msg);
-    Serial.print("Payload length: ");
-    Serial.println(len);
+  Serial.print("Payload length: ");
+  Serial.println(len);
 
-  // Only parse machine info for THIS device's getinfo topic
   if (topicStr == g_getInfoTopic) {
-    Serial.println("Matched getinfo for this device ✅");
+    Serial.println("Matched getinfo for this device");
     if (MachineInfoStore::parseAndStore(msg)) {
-      Serial.println("Machine INFO stored in memory ✅");
+      Serial.println("Machine info stored in memory");
       MachineInfoStore::printToSerial();
 
       const auto& info = MachineInfoStore::get();
       if (info.valid && info.MachineId > 0) {
-        Storage::saveMachineInfo(info);
-        Serial.println("✅ MachineInfo saved to NVS (flash)");
+        if (Storage::saveMachineInfo(info)) {
+          Serial.println("MachineInfo saved to NVS");
+        } else {
+          Serial.println("MachineInfo save to NVS failed");
         }
-
+      }
     } else {
-      Serial.println("Failed to parse/store Machine INFO ❌");
+      Serial.println("Failed to parse/store Machine INFO");
     }
   } else {
     Serial.println("Ignored (not getinfo for this device)");
@@ -56,13 +61,12 @@ void begin(PubSubClient& client, const char* host, uint16_t port, const String& 
 
   g_client->setServer(g_host, g_port);
   g_client->setCallback(onMessage);
-
-  // Helpful over mobile networks
   g_client->setKeepAlive(30);
-  g_client->setSocketTimeout(10);
+  g_client->setSocketTimeout(3);
+  g_client->setBufferSize(2048);
 
-  g_client->setBufferSize(2048);   // try 2048 first
-
+  g_lastConnectAttemptAt = 0;
+  g_lastConnectState = INT32_MIN;
 }
 
 bool isConnected() {
@@ -70,24 +74,31 @@ bool isConnected() {
 }
 
 void ensureConnected() {
-  if (!g_client) return;
-  if (g_client->connected()) return;
+  if (!g_client || g_client->connected()) return;
 
-  String clientId = "GodrejIOT-" + g_uniqueCode;
-
-  Serial.println("\nConnecting MQTT...");
-  Serial.println(clientId);
-
-  if (!g_client->connect(clientId.c_str())) {
-    Serial.print("MQTT connect failed rc=");
-    Serial.println(g_client->state());
-    delay(2000);
+  uint32_t now = millis();
+  if (g_lastConnectAttemptAt != 0 && (now - g_lastConnectAttemptAt) < MQTT_RETRY_INTERVAL_MS) {
     return;
   }
 
-  Serial.println("MQTT connected ✅");
+  String clientId = "GodrejIOT-" + g_uniqueCode;
+  Serial.println("Connecting MQTT...");
+  Serial.println(clientId);
 
-  // Resubscribe after reconnect
+  g_lastConnectAttemptAt = now;
+  if (!g_client->connect(clientId.c_str())) {
+    int state = g_client->state();
+    if (state != g_lastConnectState) {
+      Serial.print("MQTT connect failed rc=");
+      Serial.println(state);
+      g_lastConnectState = state;
+    }
+    return;
+  }
+
+  g_lastConnectState = 0;
+  Serial.println("MQTT connected");
+
   if (g_wildcard) {
     g_client->subscribe("godrej/#", 1);
     Serial.println("Subscribed: godrej/# (QoS1)");
@@ -99,7 +110,7 @@ void ensureConnected() {
 }
 
 void subscribeTopics(const String& getInfoTopic, bool wildcard, uint8_t qos) {
-  (void)qos; // PubSubClient supports qos param for subscribe overload
+  (void)qos;
   g_getInfoTopic = getInfoTopic;
   g_wildcard = wildcard;
 

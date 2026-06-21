@@ -3,7 +3,7 @@
 #include "machine_info.h"
 
 namespace Storage {
-  void begin(const char* ns = "godrej");
+  bool begin(const char* ns = "godrej");
 
   bool saveUniqueCode(const String& uniqueCode);
   bool loadUniqueCode(String& outUniqueCode);
@@ -11,11 +11,11 @@ namespace Storage {
   bool saveMachineInfo(const MachineInfo& info);
   bool loadMachineInfo(MachineInfo& outInfo);
 
-  void clearAll();
+  bool clearAll();
 
   bool isProvisioned(); // machineInfo.valid == true AND machineId > 0
   void factoryReset(bool reboot = true);
 
-  void saveWiFi(const String& ssid, const String& pass);
+  bool saveWiFi(const String& ssid, const String& pass);
   bool loadWiFi(String& outSsid, String& outPass);   
 }
