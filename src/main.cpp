@@ -17,11 +17,52 @@ PubSubClient mqtt(wifiClient);
 static bool topicsSubscribed = false;
 static bool infoRequestSent = false;
 static bool bootHeartbeatSent = false;
+static String g_networkMode = DEFAULT_NETWORK_MODE;
+static String g_mqttHost = MQTT_HOST;
+static uint16_t g_mqttPort = MQTT_PORT;
+static String g_mqttUser = MQTT_USER;
+static String g_mqttPass = MQTT_PASS;
+
+static String getCurrentUniqueCode() {
+  String uniqueCode;
+  if (Storage::loadUniqueCode(uniqueCode) && uniqueCode.length() > 0) {
+    return uniqueCode;
+  }
+  return String(UNIQUE_CODE);
+}
+
+static String topicGetInfo(const String& uniqueCode) {
+  return "godrej/getinfo/" + uniqueCode;
+}
+
+static String topicSendInfo(const String& uniqueCode) {
+  return "godrej/sendinfo/" + uniqueCode;
+}
+
+static String topicSendStatus(const String& uniqueCode) {
+  return "godrej/sendstatus/" + uniqueCode;
+}
+
+static String getChipIdHex() {
+  uint64_t chipId = ESP.getEfuseMac();
+  char buffer[13];
+  snprintf(buffer, sizeof(buffer), "%012llX", chipId);
+  return String(buffer);
+}
+
+static String buildBleName() {
+  return String("THINK-") + getChipIdHex();
+}
+
+static bool isWifiMode() {
+  return !g_networkMode.equalsIgnoreCase("SIM");
+}
 
 static String buildInfoRequestJson() {
+  String uniqueCode = getCurrentUniqueCode();
   String payload = "{";
   payload += "\"MachineId\":0,";
-  payload += "\"UniqueCode\":\"" + String(UNIQUE_CODE) + "\",";
+  payload += "\"UniqueCode\":\"" + uniqueCode + "\",";
   payload += "\"RequestType\":\"Info\"";
   payload += "}";
   return payload;
@@ -53,6 +94,7 @@ static String buildStatusDateTime() {
 
 static String buildBootHeartbeatStatusJson() {
   int machineId = 0;
+  String uniqueCode = getCurrentUniqueCode();
 
   MachineInfo cached;
   if (Storage::loadMachineInfo(cached)) {
@@ -61,7 +103,7 @@ static String buildBootHeartbeatStatusJson() {
 
   String statusData = "{";
   statusData += "\"MachineId\":" + String(machineId);
-  statusData += ",\"UniqueCode\":\"" + String(UNIQUE_CODE) + "\"";
+  statusData += ",\"UniqueCode\":\"" + uniqueCode + "\"";
   statusData += ",\"ErrorLevel\":\"0\"";
   statusData += ",\"ErrorNo\":\"0\"";
   statusData += ",\"ErrorName\":\"BOOT_HEARTBEAT\"";
@@ -91,12 +133,14 @@ void setup() {
 
   // TEMP: Uncomment for one boot when you want to clear NVS and continue startup.
   // IMPORTANT: Comment it again after use, otherwise every boot will erase NVS.
-  // Storage::factoryReset(false);
+  //Storage::factoryReset(false);
 
   ButtonManager::begin(RESET_BUTTON_PIN, RESET_BUTTON_ACTIVE_LOW);
 
   Serial.println("Starting BLE...");
-  String bleName = String("THINK-") + UNIQUE_CODE;
+  String bleName = buildBleName();
+  Serial.print("BLE Name: ");
+  Serial.println(bleName);
   BLEManager::begin(bleName);
   Serial.println("BLE begin called");
 
@@ -113,34 +157,65 @@ void setup() {
 
   Serial.println("=================================");
   Serial.println("GodrejIOT - Modular Firmware");
-  Serial.print("UniqueCode: "); Serial.println(UNIQUE_CODE);
-  Serial.print("GetInfo: "); Serial.println(topicGetInfo());
-  Serial.print("SendInfo: "); Serial.println(topicSendInfo());
-  Serial.print("SendStatus: "); Serial.println(topicSendStatus());
+  String uniqueCode = getCurrentUniqueCode();
+  Serial.print("UniqueCode: "); Serial.println(uniqueCode);
+  Serial.print("GetInfo: "); Serial.println(topicGetInfo(uniqueCode));
+  Serial.print("SendInfo: "); Serial.println(topicSendInfo(uniqueCode));
+  Serial.print("SendStatus: "); Serial.println(topicSendStatus(uniqueCode));
   Serial.println("=================================");
+
+  if (!Storage::loadNetworkMode(g_networkMode) || g_networkMode.length() == 0) {
+    g_networkMode = DEFAULT_NETWORK_MODE;
+  }
+  Serial.print("NetworkMode: ");
+  Serial.println(g_networkMode);
+
+  if (!Storage::loadMqttSettings(g_mqttHost, g_mqttPort, g_mqttUser, g_mqttPass)) {
+    g_mqttHost = MQTT_HOST;
+    g_mqttPort = MQTT_PORT;
+    g_mqttUser = MQTT_USER;
+    g_mqttPass = MQTT_PASS;
+  }
+  Serial.print("MQTT Host: ");
+  Serial.println(g_mqttHost);
+  Serial.print("MQTT Port: ");
+  Serial.println(g_mqttPort);
 
   String ssid;
   String pass;
-  if (Storage::loadWiFi(ssid, pass)) {
-    Serial.println("Using WiFi from NVS (set via BLE)");
-    WiFiManager::begin(ssid.c_str(), pass.c_str());
+  if (isWifiMode()) {
+    if (Storage::loadWiFi(ssid, pass)) {
+      Serial.println("Using WiFi from NVS (set via BLE)");
+      WiFiManager::begin(ssid.c_str(), pass.c_str());
+    } else {
+      Serial.println("No WiFi in NVS, using config.h defaults");
+      WiFiManager::begin(WIFI_SSID, WIFI_PASS);
+    }
   } else {
-    Serial.println("No WiFi in NVS, using config.h defaults");
-    WiFiManager::begin(WIFI_SSID, WIFI_PASS);
+    Serial.println("SIM mode selected. WiFi/MQTT over SIM is not implemented yet.");
   }
 
-  MqttManager::begin(mqtt, MQTT_HOST, MQTT_PORT, String(UNIQUE_CODE));
+  MqttManager::begin(mqtt, g_mqttHost.c_str(), g_mqttPort, getCurrentUniqueCode(),
+                     g_mqttUser.c_str(), g_mqttPass.c_str());
 }
 
 void loop() {
+  if (!isWifiMode()) {
+    ButtonManager::loop();
+    BLEManager::loop();
+    delay(10);
+    return;
+  }
+
   WiFiManager::ensureConnected();
 
   if (WiFiManager::isConnected()) {
     MqttManager::ensureConnected();
 
     if (MqttManager::isConnected()) {
+      String uniqueCode = getCurrentUniqueCode();
       if (!topicsSubscribed) {
-        MqttManager::subscribeTopics(topicGetInfo(), false, 1);
+        MqttManager::subscribeTopics(topicGetInfo(uniqueCode), false, 1);
         topicsSubscribed = true;
         infoRequestSent = false;
         bootHeartbeatSent = false;
@@ -150,10 +225,10 @@ void loop() {
 
       if (!bootHeartbeatSent) {
         String hb = buildBootHeartbeatStatusJson();
-        bool ok = MqttManager::publishJson(topicSendStatus(), hb);
+        bool ok = MqttManager::publishJson(topicSendStatus(uniqueCode), hb);
 
         Serial.print("Published Boot Heartbeat -> ");
-        Serial.print(topicSendStatus());
+        Serial.print(topicSendStatus(uniqueCode));
         Serial.print(" ok=");
         Serial.println(ok ? "1" : "0");
         Serial.println(hb);
@@ -169,10 +244,10 @@ void loop() {
         }
       } else if (!infoRequestSent) {
         String payload = buildInfoRequestJson();
-        bool ok = MqttManager::publishJson(topicSendInfo(), payload);
+        bool ok = MqttManager::publishJson(topicSendInfo(uniqueCode), payload);
 
         Serial.print("Published Info Request -> ");
-        Serial.print(topicSendInfo());
+        Serial.print(topicSendInfo(uniqueCode));
         Serial.print(" ok=");
         Serial.println(ok ? "1" : "0");
         Serial.println(payload);

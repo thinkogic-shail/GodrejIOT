@@ -7,10 +7,13 @@ static const char* UNIQUE_CODE = "G-IOT";
 // -------- WiFi --------
 static const char* WIFI_SSID = "OpShailendra";
 static const char* WIFI_PASS = "12345678";
+static const char* DEFAULT_NETWORK_MODE = "WIFI";
 
 // -------- MQTT --------
 static const char* MQTT_HOST = "13.126.103.168";
 static const uint16_t MQTT_PORT = 1883;
+static const char* MQTT_USER = "";
+static const char* MQTT_PASS = "";
 
 // Topics are derived from UNIQUE_CODE
 inline String topicGetInfo() { return "godrej/getinfo/" + String(UNIQUE_CODE); }

@@ -3,7 +3,8 @@
 #include <PubSubClient.h>
 
 namespace MqttManager {
-  void begin(PubSubClient& client, const char* host, uint16_t port, const String& uniqueCode);
+  void begin(PubSubClient& client, const char* host, uint16_t port, const String& uniqueCode,
+             const char* user = nullptr, const char* pass = nullptr);
   void ensureConnected();
 
   // Subscribe / publish helpers

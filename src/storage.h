@@ -17,5 +17,11 @@ namespace Storage {
   void factoryReset(bool reboot = true);
 
   bool saveWiFi(const String& ssid, const String& pass);
-  bool loadWiFi(String& outSsid, String& outPass);   
+  bool loadWiFi(String& outSsid, String& outPass);
+
+  bool saveNetworkMode(const String& mode);
+  bool loadNetworkMode(String& outMode);
+
+  bool saveMqttSettings(const String& host, uint16_t port, const String& user, const String& pass);
+  bool loadMqttSettings(String& outHost, uint16_t& outPort, String& outUser, String& outPass);
 }

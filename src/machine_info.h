@@ -7,6 +7,7 @@ struct MachineInfo {
   String ErrorCode;
   String ErrorMessage;
   String RequestType;
+  String UniqueCode;
 
   int MachineId = 0;
   String MachineName;

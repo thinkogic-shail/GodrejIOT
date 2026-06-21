@@ -1,4 +1,5 @@
 #include "ble_manager.h"
+#include "config.h"
 #include "storage.h"
 #include "machine_info.h"
 
@@ -9,6 +10,38 @@
 
 static NimBLECharacteristic* g_tx = nullptr;
 static bool g_connected = false;
+
+static String loadNetworkModeOrDefault() {
+  String mode;
+  if (!Storage::loadNetworkMode(mode) || mode.length() == 0) {
+    mode = DEFAULT_NETWORK_MODE;
+  }
+  return mode;
+}
+
+static String loadUniqueCodeOrDefault() {
+  String uniqueCode;
+  if (!Storage::loadUniqueCode(uniqueCode) || uniqueCode.length() == 0) {
+    uniqueCode = UNIQUE_CODE;
+  }
+  return uniqueCode;
+}
+
+static void loadWiFiOrDefault(String& ssid, String& pass) {
+  if (!Storage::loadWiFi(ssid, pass)) {
+    ssid = WIFI_SSID;
+    pass = WIFI_PASS;
+  }
+}
+
+static void loadMqttOrDefault(String& host, uint16_t& port, String& user, String& pass) {
+  if (!Storage::loadMqttSettings(host, port, user, pass)) {
+    host = MQTT_HOST;
+    port = MQTT_PORT;
+    user = MQTT_USER;
+    pass = MQTT_PASS;
+  }
+}
 
 static String buildStatusJson() {
   MachineInfo info;
@@ -26,6 +59,84 @@ static String buildStatusJson() {
   }
   json += "}";
   return json;
+}
+
+static String buildSettingsJson() {
+  String uniqueCode = loadUniqueCodeOrDefault();
+  String mode = loadNetworkModeOrDefault();
+  String wifiSsid;
+  String wifiPass;
+  String mqttHost;
+  String mqttUser;
+  String mqttPass;
+  uint16_t mqttPort = 0;
+
+  loadWiFiOrDefault(wifiSsid, wifiPass);
+  loadMqttOrDefault(mqttHost, mqttPort, mqttUser, mqttPass);
+
+  String json = "{";
+  json += "\"uniqueCode\":\"" + uniqueCode + "\"";
+  json += ",";
+  json += "\"mode\":\"" + mode + "\"";
+  json += ",\"wifiSsid\":\"" + wifiSsid + "\"";
+  json += ",\"wifiPassword\":\"" + wifiPass + "\"";
+  json += ",\"mqttHost\":\"" + mqttHost + "\"";
+  json += ",\"mqttPort\":\"" + String(mqttPort) + "\"";
+  json += ",\"mqttUsername\":\"" + mqttUser + "\"";
+  json += ",\"mqttPassword\":\"" + mqttPass + "\"";
+  json += "}";
+  return json;
+}
+
+static void handleSetUniqueCode(const String& cmd) {
+  int colon = cmd.indexOf(':');
+  if (colon < 0) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"Invalid SET_UNIQUE_CODE format\"}");
+    return;
+  }
+
+  String uniqueCode = cmd.substring(colon + 1);
+  uniqueCode.trim();
+
+  if (uniqueCode.length() == 0) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"UniqueCode empty\"}");
+    return;
+  }
+
+  if (!Storage::saveUniqueCode(uniqueCode)) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"UniqueCode save failed\"}");
+    return;
+  }
+
+  BLEManager::notifyText("{\"ok\":true,\"msg\":\"UniqueCode saved. Rebooting\"}");
+  delay(300);
+  ESP.restart();
+}
+
+static void handleSetMode(const String& cmd) {
+  int colon = cmd.indexOf(':');
+  if (colon < 0) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"Invalid SET_MODE format\"}");
+    return;
+  }
+
+  String mode = cmd.substring(colon + 1);
+  mode.trim();
+  mode.toUpperCase();
+
+  if (!(mode == "WIFI" || mode == "SIM")) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"Mode must be WIFI or SIM\"}");
+    return;
+  }
+
+  if (!Storage::saveNetworkMode(mode)) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"Mode save failed\"}");
+    return;
+  }
+
+  BLEManager::notifyText("{\"ok\":true,\"msg\":\"Mode saved. Rebooting\"}");
+  delay(300);
+  ESP.restart();
 }
 
 static void handleSetWiFi(const String& cmd) {
@@ -62,6 +173,48 @@ static void handleSetWiFi(const String& cmd) {
   ESP.restart();
 }
 
+static void handleSetMqtt(const String& cmd) {
+  int colon = cmd.indexOf(':');
+  if (colon < 0) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"Invalid SET_MQTT format\"}");
+    return;
+  }
+
+  String payload = cmd.substring(colon + 1);
+  int p1 = payload.indexOf('|');
+  int p2 = (p1 >= 0) ? payload.indexOf('|', p1 + 1) : -1;
+  int p3 = (p2 >= 0) ? payload.indexOf('|', p2 + 1) : -1;
+  if (p1 < 0 || p2 < 0 || p3 < 0) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"Invalid SET_MQTT format\"}");
+    return;
+  }
+
+  String host = payload.substring(0, p1);
+  String portText = payload.substring(p1 + 1, p2);
+  String user = payload.substring(p2 + 1, p3);
+  String pass = payload.substring(p3 + 1);
+
+  host.trim();
+  portText.trim();
+  user.trim();
+  pass.trim();
+
+  uint16_t port = (uint16_t) portText.toInt();
+  if (host.length() == 0 || port == 0) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"MQTT host/port invalid\"}");
+    return;
+  }
+
+  if (!Storage::saveMqttSettings(host, port, user, pass)) {
+    BLEManager::notifyText("{\"ok\":false,\"msg\":\"MQTT save failed\"}");
+    return;
+  }
+
+  BLEManager::notifyText("{\"ok\":true,\"msg\":\"MQTT saved. Rebooting\"}");
+  delay(300);
+  ESP.restart();
+}
+
 
 class ServerCB : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* s)  {
@@ -89,6 +242,16 @@ class RxCB : public NimBLECharacteristicCallbacks {
       return;
     }
 
+    if (cmd.equalsIgnoreCase("GET_SETTINGS")) {
+      BLEManager::notifyText(buildSettingsJson());
+      return;
+    }
+
+    if (cmd.startsWith("SET_UNIQUE_CODE:")) {
+      handleSetUniqueCode(cmd);
+      return;
+    }
+
     if (cmd.equalsIgnoreCase("REBOOT")) {
       BLEManager::notifyText("{\"ok\":true,\"msg\":\"Rebooting\"}");
       delay(200);
@@ -102,8 +265,16 @@ class RxCB : public NimBLECharacteristicCallbacks {
       Storage::factoryReset(true); // clears NVS + reboots
       return;
     }
+    if (cmd.startsWith("SET_MODE:")) {
+      handleSetMode(cmd);
+      return;
+    }
     if (cmd.startsWith("SET_WIFI:")) {
       handleSetWiFi(cmd);
+      return;
+    }
+    if (cmd.startsWith("SET_MQTT:")) {
+      handleSetMqtt(cmd);
       return;
     }
 

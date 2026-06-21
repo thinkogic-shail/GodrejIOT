@@ -20,6 +20,7 @@ void printToSerial() {
   Serial.printf("ErrorCode: %s\n", g_machine.ErrorCode.c_str());
   Serial.printf("ErrorMessage: %s\n", g_machine.ErrorMessage.c_str());
   Serial.printf("RequestType: %s\n", g_machine.RequestType.c_str());
+  Serial.printf("UniqueCode: %s\n", g_machine.UniqueCode.c_str());
 
   Serial.printf("MachineId: %d\n", g_machine.MachineId);
   Serial.printf("MachineName: %s\n", g_machine.MachineName.c_str());
@@ -73,6 +74,7 @@ bool parseAndStore(const String& jsonArrayPayload) {
   g_machine.ErrorCode = (const char*)(o["ErrorCode"] | "");
   g_machine.ErrorMessage = (const char*)(o["ErrorMessage"] | "");
   g_machine.RequestType = (const char*)(o["RequestType"] | "");
+  g_machine.UniqueCode = (const char*)(o["UniqueCode"] | "");
 
   g_machine.MachineId = (int)(o["MachineId"] | 0);
   g_machine.MachineName = (const char*)(o["MachineName"] | "");

@@ -6,6 +6,8 @@ static PubSubClient* g_client = nullptr;
 static const char* g_host = nullptr;
 static uint16_t g_port = 1883;
 static String g_uniqueCode;
+static String g_user;
+static String g_pass;
 
 static String g_getInfoTopic;
 static bool g_wildcard = false;
@@ -53,11 +55,14 @@ static void onMessage(char* topic, byte* payload, unsigned int len) {
 
 namespace MqttManager {
 
-void begin(PubSubClient& client, const char* host, uint16_t port, const String& uniqueCode) {
+void begin(PubSubClient& client, const char* host, uint16_t port, const String& uniqueCode,
+           const char* user, const char* pass) {
   g_client = &client;
   g_host = host;
   g_port = port;
   g_uniqueCode = uniqueCode;
+  g_user = user ? user : "";
+  g_pass = pass ? pass : "";
 
   g_client->setServer(g_host, g_port);
   g_client->setCallback(onMessage);
@@ -86,7 +91,14 @@ void ensureConnected() {
   Serial.println(clientId);
 
   g_lastConnectAttemptAt = now;
-  if (!g_client->connect(clientId.c_str())) {
+  bool connected = false;
+  if (g_user.length() > 0) {
+    connected = g_client->connect(clientId.c_str(), g_user.c_str(), g_pass.c_str());
+  } else {
+    connected = g_client->connect(clientId.c_str());
+  }
+
+  if (!connected) {
     int state = g_client->state();
     if (state != g_lastConnectState) {
       Serial.print("MQTT connect failed rc=");

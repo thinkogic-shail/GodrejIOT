@@ -158,4 +158,47 @@ bool loadWiFi(String& outSsid, String& outPass) {
   return true;
 }
 
+bool saveNetworkMode(const String& mode) {
+  return writeString("net_mode", mode);
+}
+
+bool loadNetworkMode(String& outMode) {
+  size_t modeLen = prefs.getString("net_mode", nullptr, 0);
+  if (modeLen == 0) {
+    outMode = "";
+    return false;
+  }
+
+  outMode = prefs.getString("net_mode", "");
+  return outMode.length() > 0;
+}
+
+bool saveMqttSettings(const String& host, uint16_t port, const String& user, const String& pass) {
+  bool ok = writeString("mqtt_host", host);
+  ok &= prefs.putUShort("mqtt_port", port) == sizeof(uint16_t);
+  ok &= writeString("mqtt_user", user);
+  ok &= writeString("mqtt_pass", pass);
+  if (!ok) {
+    Serial.println("Storage saveMqttSettings failed");
+  }
+  return ok;
+}
+
+bool loadMqttSettings(String& outHost, uint16_t& outPort, String& outUser, String& outPass) {
+  size_t hostLen = prefs.getString("mqtt_host", nullptr, 0);
+  if (hostLen == 0) {
+    outHost = "";
+    outPort = 0;
+    outUser = "";
+    outPass = "";
+    return false;
+  }
+
+  outHost = prefs.getString("mqtt_host", "");
+  outPort = prefs.getUShort("mqtt_port", 0);
+  outUser = prefs.getString("mqtt_user", "");
+  outPass = prefs.getString("mqtt_pass", "");
+  return outHost.length() > 0 && outPort > 0;
+}
+
 } // namespace
