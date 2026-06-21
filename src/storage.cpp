@@ -48,6 +48,11 @@ bool saveUniqueCode(const String& uniqueCode) {
 }
 
 bool loadUniqueCode(String& outUniqueCode) {
+  if (!prefs.isKey("unique")) {
+    outUniqueCode = "";
+    return false;
+  }
+
   outUniqueCode = prefs.getString("unique", "");
   return outUniqueCode.length() > 0;
 }

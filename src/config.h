@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 // -------- Device Identity --------
-static const char* UNIQUE_CODE = "G-IOT";
+static const char* UNIQUE_CODE = "";
 
 // -------- WiFi --------
 static const char* WIFI_SSID = "OpShailendra";

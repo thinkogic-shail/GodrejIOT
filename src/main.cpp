@@ -25,10 +25,14 @@ static String g_mqttPass = MQTT_PASS;
 
 static String getCurrentUniqueCode() {
   String uniqueCode;
-  if (Storage::loadUniqueCode(uniqueCode) && uniqueCode.length() > 0) {
-    return uniqueCode;
+  if (!Storage::loadUniqueCode(uniqueCode)) {
+    return "";
   }
-  return String(UNIQUE_CODE);
+  return uniqueCode;
+}
+
+static bool hasCurrentUniqueCode() {
+  return getCurrentUniqueCode().length() > 0;
 }
 
 static String topicGetInfo(const String& uniqueCode) {
@@ -158,10 +162,17 @@ void setup() {
   Serial.println("=================================");
   Serial.println("GodrejIOT - Modular Firmware");
   String uniqueCode = getCurrentUniqueCode();
-  Serial.print("UniqueCode: "); Serial.println(uniqueCode);
-  Serial.print("GetInfo: "); Serial.println(topicGetInfo(uniqueCode));
-  Serial.print("SendInfo: "); Serial.println(topicSendInfo(uniqueCode));
-  Serial.print("SendStatus: "); Serial.println(topicSendStatus(uniqueCode));
+  Serial.print("UniqueCode: ");
+  Serial.println(uniqueCode.length() > 0 ? uniqueCode : "<not set>");
+  if (uniqueCode.length() > 0) {
+    Serial.print("GetInfo: "); Serial.println(topicGetInfo(uniqueCode));
+    Serial.print("SendInfo: "); Serial.println(topicSendInfo(uniqueCode));
+    Serial.print("SendStatus: "); Serial.println(topicSendStatus(uniqueCode));
+  } else {
+    Serial.println("GetInfo: <disabled until UniqueCode is set>");
+    Serial.println("SendInfo: <disabled until UniqueCode is set>");
+    Serial.println("SendStatus: <disabled until UniqueCode is set>");
+  }
   Serial.println("=================================");
 
   if (!Storage::loadNetworkMode(g_networkMode) || g_networkMode.length() == 0) {
@@ -195,11 +206,14 @@ void setup() {
     Serial.println("SIM mode selected. WiFi/MQTT over SIM is not implemented yet.");
   }
 
-  MqttManager::begin(mqtt, g_mqttHost.c_str(), g_mqttPort, getCurrentUniqueCode(),
+  MqttManager::begin(mqtt, g_mqttHost.c_str(), g_mqttPort,
+                     hasCurrentUniqueCode() ? getCurrentUniqueCode() : getChipIdHex(),
                      g_mqttUser.c_str(), g_mqttPass.c_str());
 }
 
 void loop() {
+  static bool uniqueCodeMissingPrinted = false;
+
   if (!isWifiMode()) {
     ButtonManager::loop();
     BLEManager::loop();
@@ -210,6 +224,19 @@ void loop() {
   WiFiManager::ensureConnected();
 
   if (WiFiManager::isConnected()) {
+    if (!hasCurrentUniqueCode()) {
+      if (!uniqueCodeMissingPrinted) {
+        Serial.println("UniqueCode not set. Waiting for BLE provisioning before MQTT connect.");
+        uniqueCodeMissingPrinted = true;
+      }
+      topicsSubscribed = false;
+      ButtonManager::loop();
+      BLEManager::loop();
+      delay(10);
+      return;
+    }
+
+    uniqueCodeMissingPrinted = false;
     MqttManager::ensureConnected();
 
     if (MqttManager::isConnected()) {

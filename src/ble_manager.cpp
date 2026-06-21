@@ -7,9 +7,11 @@
 #include "esp_system.h"
 #include "esp_bt.h"
 
-
 static NimBLECharacteristic* g_tx = nullptr;
+static NimBLEServer* g_server = nullptr;
 static bool g_connected = false;
+static constexpr uint16_t INVALID_CONN_HANDLE = 0xFFFF;
+static uint16_t g_connHandle = INVALID_CONN_HANDLE;
 
 static String loadNetworkModeOrDefault() {
   String mode;
@@ -21,8 +23,8 @@ static String loadNetworkModeOrDefault() {
 
 static String loadUniqueCodeOrDefault() {
   String uniqueCode;
-  if (!Storage::loadUniqueCode(uniqueCode) || uniqueCode.length() == 0) {
-    uniqueCode = UNIQUE_CODE;
+  if (!Storage::loadUniqueCode(uniqueCode)) {
+    uniqueCode = "";
   }
   return uniqueCode;
 }
@@ -48,8 +50,10 @@ static String buildStatusJson() {
   bool hasInfo = Storage::loadMachineInfo(info);
 
   String json = "{";
-  json += "\"provisioned\":"; json += (Storage::isProvisioned() ? "true" : "false");
-  json += ",\"hasMachineInfo\":"; json += (hasInfo ? "true" : "false");
+  json += "\"provisioned\":";
+  json += (Storage::isProvisioned() ? "true" : "false");
+  json += ",\"hasMachineInfo\":";
+  json += (hasInfo ? "true" : "false");
   if (hasInfo) {
     json += ",\"MachineId\":" + String(info.MachineId);
     json += ",\"MachineName\":\"" + info.MachineName + "\"";
@@ -76,8 +80,7 @@ static String buildSettingsJson() {
 
   String json = "{";
   json += "\"uniqueCode\":\"" + uniqueCode + "\"";
-  json += ",";
-  json += "\"mode\":\"" + mode + "\"";
+  json += ",\"mode\":\"" + mode + "\"";
   json += ",\"wifiSsid\":\"" + wifiSsid + "\"";
   json += ",\"wifiPassword\":\"" + wifiPass + "\"";
   json += ",\"mqttHost\":\"" + mqttHost + "\"";
@@ -91,23 +94,29 @@ static String buildSettingsJson() {
 static void handleSetUniqueCode(const String& cmd) {
   int colon = cmd.indexOf(':');
   if (colon < 0) {
+    Serial.println("BLE TX: {\"ok\":false,\"msg\":\"Invalid SET_UNIQUE_CODE format\"}");
     BLEManager::notifyText("{\"ok\":false,\"msg\":\"Invalid SET_UNIQUE_CODE format\"}");
     return;
   }
 
   String uniqueCode = cmd.substring(colon + 1);
   uniqueCode.trim();
+  Serial.print("BLE SET_UNIQUE_CODE: ");
+  Serial.println(uniqueCode);
 
   if (uniqueCode.length() == 0) {
+    Serial.println("BLE TX: {\"ok\":false,\"msg\":\"UniqueCode empty\"}");
     BLEManager::notifyText("{\"ok\":false,\"msg\":\"UniqueCode empty\"}");
     return;
   }
 
   if (!Storage::saveUniqueCode(uniqueCode)) {
+    Serial.println("BLE TX: {\"ok\":false,\"msg\":\"UniqueCode save failed\"}");
     BLEManager::notifyText("{\"ok\":false,\"msg\":\"UniqueCode save failed\"}");
     return;
   }
 
+  Serial.println("BLE TX: {\"ok\":true,\"msg\":\"UniqueCode saved. Rebooting\"}");
   BLEManager::notifyText("{\"ok\":true,\"msg\":\"UniqueCode saved. Rebooting\"}");
   delay(300);
   ESP.restart();
@@ -141,7 +150,7 @@ static void handleSetMode(const String& cmd) {
 
 static void handleSetWiFi(const String& cmd) {
   int colon = cmd.indexOf(':');
-  int pipe  = cmd.indexOf('|');
+  int pipe = cmd.indexOf('|');
 
   if (colon < 0 || pipe < 0 || pipe <= colon) {
     BLEManager::notifyText("{\"ok\":false,\"msg\":\"Invalid SET_WIFI format\"}");
@@ -150,7 +159,6 @@ static void handleSetWiFi(const String& cmd) {
 
   String ssid = cmd.substring(colon + 1, pipe);
   String pass = cmd.substring(pipe + 1);
-
   ssid.trim();
   pass.trim();
 
@@ -168,7 +176,6 @@ static void handleSetWiFi(const String& cmd) {
   }
 
   BLEManager::notifyText("{\"ok\":true,\"msg\":\"WiFi saved. Rebooting\"}");
-
   delay(300);
   ESP.restart();
 }
@@ -193,13 +200,12 @@ static void handleSetMqtt(const String& cmd) {
   String portText = payload.substring(p1 + 1, p2);
   String user = payload.substring(p2 + 1, p3);
   String pass = payload.substring(p3 + 1);
-
   host.trim();
   portText.trim();
   user.trim();
   pass.trim();
 
-  uint16_t port = (uint16_t) portText.toInt();
+  uint16_t port = (uint16_t)portText.toInt();
   if (host.length() == 0 || port == 0) {
     BLEManager::notifyText("{\"ok\":false,\"msg\":\"MQTT host/port invalid\"}");
     return;
@@ -215,23 +221,45 @@ static void handleSetMqtt(const String& cmd) {
   ESP.restart();
 }
 
+static void handleDisconnect() {
+  BLEManager::notifyText("{\"status\":\"disconnecting\"}");
+
+  if (!g_server || g_connHandle == INVALID_CONN_HANDLE) {
+    NimBLEDevice::startAdvertising();
+    return;
+  }
+
+  delay(100);
+  if (!g_server->disconnect(g_connHandle)) {
+    Serial.println("BLE disconnect request failed");
+    NimBLEDevice::startAdvertising();
+  }
+}
 
 class ServerCB : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer* s)  {
+  void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
     g_connected = true;
-    Serial.println("BLE connected ✅");
+    g_server = server;
+    g_connHandle = connInfo.getConnHandle();
+    Serial.print("BLE connected handle=");
+    Serial.println(g_connHandle);
   }
-  void onDisconnect(NimBLEServer* s)  {
+
+  void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) override {
+    (void)connInfo;
+    (void)reason;
     g_connected = false;
+    g_connHandle = INVALID_CONN_HANDLE;
     Serial.println("BLE disconnected");
-    NimBLEDevice::startAdvertising();
+    server->startAdvertising();
   }
 };
 
 class RxCB : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* c)  {
-    std::string v = c->getValue();
-    String cmd = String(v.c_str());
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& connInfo) override {
+    g_connHandle = connInfo.getConnHandle();
+    std::string value = c->getValue();
+    String cmd = String(value.c_str());
     cmd.trim();
 
     Serial.print("BLE RX: ");
@@ -243,7 +271,15 @@ class RxCB : public NimBLECharacteristicCallbacks {
     }
 
     if (cmd.equalsIgnoreCase("GET_SETTINGS")) {
-      BLEManager::notifyText(buildSettingsJson());
+      String settingsJson = buildSettingsJson();
+      Serial.print("BLE TX: ");
+      Serial.println(settingsJson);
+      BLEManager::notifyText(settingsJson);
+      return;
+    }
+
+    if (cmd.equalsIgnoreCase("DISCONNECT") || cmd.equalsIgnoreCase("BYE")) {
+      handleDisconnect();
       return;
     }
 
@@ -262,17 +298,20 @@ class RxCB : public NimBLECharacteristicCallbacks {
     if (cmd.equalsIgnoreCase("RESET")) {
       BLEManager::notifyText("{\"ok\":true,\"msg\":\"Factory reset\"}");
       delay(200);
-      Storage::factoryReset(true); // clears NVS + reboots
+      Storage::factoryReset(true);
       return;
     }
+
     if (cmd.startsWith("SET_MODE:")) {
       handleSetMode(cmd);
       return;
     }
+
     if (cmd.startsWith("SET_WIFI:")) {
       handleSetWiFi(cmd);
       return;
     }
+
     if (cmd.startsWith("SET_MQTT:")) {
       handleSetMqtt(cmd);
       return;
@@ -295,19 +334,17 @@ void begin(const String& deviceName) {
 
   Serial.println("BLE init: creating server");
   NimBLEServer* server = NimBLEDevice::createServer();
+  g_server = server;
   server->setCallbacks(new ServerCB());
 
-  // Nordic UART style UUIDs
   NimBLEService* svc = server->createService("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
 
-  // RX (Write)
   NimBLECharacteristic* rx = svc->createCharacteristic(
     "6E400002-B5A3-F393-E0A9-E50E24DCCA9E",
     NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
   );
   rx->setCallbacks(new RxCB());
 
-  // TX (Notify)
   g_tx = svc->createCharacteristic(
     "6E400003-B5A3-F393-E0A9-E50E24DCCA9E",
     NIMBLE_PROPERTY::NOTIFY
@@ -315,37 +352,23 @@ void begin(const String& deviceName) {
 
   svc->start();
 
-//   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-//   adv->addServiceUUID(svc->getUUID());
-//   adv->start();
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  NimBLEAdvertisementData advData;
+  advData.setName(deviceName.c_str());
+  advData.addServiceUUID(svc->getUUID());
 
-  
-//   Serial.println("BLE started ✅");
-NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  NimBLEAdvertisementData scanResp;
+  scanResp.setName(deviceName.c_str());
 
-// ---------- Advertisement data ----------
-NimBLEAdvertisementData advData;
-advData.setName(deviceName.c_str());
-// advData.setFlags(ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
-advData.addServiceUUID(svc->getUUID());
-
-// ---------- Scan response data ----------
-NimBLEAdvertisementData scanResp;
-scanResp.setName(deviceName.c_str());   // 🔑 Name in scan response
-
-adv->setAdvertisementData(advData);
-adv->setScanResponseData(scanResp);
+  adv->setAdvertisementData(advData);
+  adv->setScanResponseData(scanResp);
 
   Serial.println("BLE init: starting advertising");
   adv->start();
-
   Serial.println("BLE advertising started (adv + scan response)");
-
-
 }
 
 void loop() {
-  // NimBLE runs in background; nothing required here
 }
 
 bool isConnected() {
