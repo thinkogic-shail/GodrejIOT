@@ -6,6 +6,7 @@ namespace MqttManager {
   void begin(PubSubClient& client, const char* host, uint16_t port, const String& uniqueCode,
              const char* user = nullptr, const char* pass = nullptr);
   void ensureConnected();
+  void disconnect();
 
   // Subscribe / publish helpers
   void subscribeTopics(const String& getInfoTopic, bool wildcard = false, uint8_t qos = 1);

@@ -1,4 +1,5 @@
 #include "machine_info.h"
+#include "config.h"
 #include <ArduinoJson.h>
 
 static MachineInfo g_machine;

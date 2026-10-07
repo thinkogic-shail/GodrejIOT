@@ -213,6 +213,27 @@ void setup() {
 
 void loop() {
   static bool uniqueCodeMissingPrinted = false;
+  static bool maintenancePauseApplied = false;
+
+  if (BLEManager::isMaintenanceMode()) {
+    if (!maintenancePauseApplied) {
+      Serial.println("Maintenance mode active. Pausing WiFi/MQTT until reboot.");
+      MqttManager::disconnect();
+      WiFiManager::disconnect();
+      topicsSubscribed = false;
+      infoRequestSent = false;
+      bootHeartbeatSent = false;
+      uniqueCodeMissingPrinted = false;
+      maintenancePauseApplied = true;
+    }
+
+    ButtonManager::loop();
+    BLEManager::loop();
+    delay(10);
+    return;
+  }
+
+  maintenancePauseApplied = false;
 
   if (!isWifiMode()) {
     ButtonManager::loop();

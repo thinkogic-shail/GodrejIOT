@@ -1,4 +1,5 @@
 #include "mqtt_manager.h"
+#include "config.h"
 #include "machine_info.h"
 #include "storage.h"
 
@@ -119,6 +120,18 @@ void ensureConnected() {
     g_client->subscribe(g_getInfoTopic.c_str(), 1);
     Serial.print("Subscribed: "); Serial.println(g_getInfoTopic);
   }
+}
+
+void disconnect() {
+  if (!g_client) return;
+
+  if (g_client->connected()) {
+    Serial.println("MQTT disconnect: maintenance mode");
+    g_client->disconnect();
+  }
+
+  g_lastConnectAttemptAt = 0;
+  g_lastConnectState = INT32_MIN;
 }
 
 void subscribeTopics(const String& getInfoTopic, bool wildcard, uint8_t qos) {

@@ -1,4 +1,5 @@
 #include "button_manager.h"
+#include "ble_manager.h"
 #include "storage.h"
 #include "config.h" 
 
@@ -53,6 +54,7 @@ void loop() {
     if (now - g_pressedAt >= LONG_PRESS_MS) {
       g_handledLong = true;
       Serial.println("🔴 Long press detected → FACTORY RESET");
+      BLEManager::release();
       Storage::factoryReset(true); // clears NVS + reboots
     }
   }
@@ -65,6 +67,7 @@ void loop() {
     if (!g_handledLong && held >= SHORT_PRESS_MS) {
       Serial.println("🟡 Short press detected → REBOOT");
       delay(200);
+      BLEManager::release();
       ESP.restart();
     }
 

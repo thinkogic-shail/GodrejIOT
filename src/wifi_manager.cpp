@@ -1,4 +1,5 @@
 #include "wifi_manager.h"
+#include "config.h"
 #include <WiFi.h>
 
 static String g_ssid;
@@ -77,6 +78,16 @@ void ensureConnected() {
   }
 
   g_lastStatus = status;
+}
+
+void disconnect() {
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi disconnect: maintenance mode");
+  }
+  WiFi.disconnect(true, true);
+  g_attemptInProgress = false;
+  g_lastAttemptAt = 0;
+  g_lastStatus = WL_IDLE_STATUS;
 }
 
 } // namespace

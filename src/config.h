@@ -1,6 +1,44 @@
 #pragma once
 #include <Arduino.h>
 
+#ifndef DEBUG_LOGS
+#define DEBUG_LOGS 1
+#endif
+
+#if !DEBUG_LOGS
+class DebugSerialProxy {
+ public:
+  template <typename... Args>
+  void begin(Args...) {}
+
+  size_t println() { return 0; }
+
+  template <typename T>
+  size_t print(const T&) { return 0; }
+
+  template <typename T>
+  size_t println(const T&) { return 0; }
+
+  template <typename... Args>
+  size_t printf(const char*, Args...) { return 0; }
+};
+
+inline DebugSerialProxy DebugSerial;
+#define Serial DebugSerial
+#endif
+
+#if DEBUG_LOGS
+#define DBG_BEGIN(...) Serial.begin(__VA_ARGS__)
+#define DBG_PRINT(...) Serial.print(__VA_ARGS__)
+#define DBG_PRINTLN(...) Serial.println(__VA_ARGS__)
+#define DBG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+#define DBG_BEGIN(...)
+#define DBG_PRINT(...)
+#define DBG_PRINTLN(...)
+#define DBG_PRINTF(...)
+#endif
+
 // -------- Device Identity --------
 static const char* UNIQUE_CODE = "";
 
