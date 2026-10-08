@@ -69,7 +69,8 @@ void begin(PubSubClient& client, const char* host, uint16_t port, const String& 
   g_client->setCallback(onMessage);
   g_client->setKeepAlive(30);
   g_client->setSocketTimeout(3);
-  g_client->setBufferSize(2048);
+  // A 512-byte UART capture can expand to 3072 bytes when JSON-escaped.
+  g_client->setBufferSize(4096);
 
   g_lastConnectAttemptAt = 0;
   g_lastConnectState = INT32_MIN;

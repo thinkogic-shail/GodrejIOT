@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <time.h>
+#include <ArduinoJson.h>
 
 #include "config.h"
 #include "wifi_manager.h"
@@ -10,6 +11,12 @@
 #include "machine_info.h"
 #include "ble_manager.h"
 #include "button_manager.h"
+#include "vending_serial.h"
+#include "machine_status_messages.h"
+#include "machine_status_messages.h"
+#include "cellular_manager.h"
+#include "time_sync.h"
+#include <esp_task_wdt.h>
 
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
@@ -22,6 +29,117 @@ static String g_mqttHost = MQTT_HOST;
 static uint16_t g_mqttPort = MQTT_PORT;
 static String g_mqttUser = MQTT_USER;
 static String g_mqttPass = MQTT_PASS;
+static uint32_t g_lastPublishedCounterSequence = 0;
+static uint32_t g_lastCounterPublishAttempt = 0;
+static bool g_counterPublishAttempted = false;
+static bool g_watchdogActive = false;
+static uint32_t g_lastPublishedDiagnosticAttempt = 0;
+static uint32_t g_lastDiagnosticPublishAt = 0;
+static bool g_diagnosticPublishAttempted = false;
+
+static void feedRecoveryWatchdog() {
+  if (g_watchdogActive) esp_task_wdt_reset();
+}
+
+static void publishCounterDiagnostic(const String& uniqueCode) {
+  const uint32_t now = millis();
+  if (g_diagnosticPublishAttempted && now - g_lastDiagnosticPublishAt < 1000) return;
+  String status, raw;
+  uint32_t attempt, finishedAt;
+  time_t epoch;
+  if (!VendingSerial::latestResult(status, raw, attempt, finishedAt, epoch) ||
+      attempt == g_lastPublishedDiagnosticAttempt) return;
+  g_diagnosticPublishAttempted = true;
+  g_lastDiagnosticPublishAt = now;
+  CounterProtocol::Reading reading;
+#if MACHINE_STATUS_PROBE
+  uint32_t level = 0, number = 0;
+  const char* error = status == "complete"
+      ? CounterProtocol::parseMachineStatus(raw.c_str(), raw.length(), level, number)
+      : status.c_str();
+#else
+  const char* error = status == "complete"
+      ? CounterProtocol::parse(raw.c_str(), raw.length(), reading)
+      : status.c_str();
+#endif
+  JsonDocument doc;
+  doc["UniqueCode"] = uniqueCode;
+#if MACHINE_STATUS_PROBE
+  doc["RequestType"] = "MachineStatusDiagnostic";
+  doc["Command"] = "MACHINE_STATUS";
+  doc["SentCommand"] = "*1,E,r,1,0,5B\\r";
+  if (!error) {
+    doc["ErrorLevel"] = level;
+    doc["ErrorNumber"] = number;
+    doc["MachineMessage"] = machineStatusMessage(level, number);
+    doc["MachineMessage"] = machineStatusMessage(level, number);
+  }
+#else
+  doc["RequestType"] = "CounterDiagnostic";
+  doc["Command"] = "READ_ALL_BOTH_COUNTERS";
+#endif
+  doc["AttemptSequence"] = attempt;
+  doc["CapturedAtUptimeMs"] = finishedAt;
+  if (epoch) doc["CapturedDateTime"] = TimeSync::format(epoch);
+  else doc["CapturedDateTime"] = nullptr;
+  doc["Status"] = status;
+  doc["ReceivedBytes"] = raw.length();
+  doc["RxPin"] = VendingSerial::activeRxPin();
+  doc["TxPin"] = VendingSerial::activeTxPin();
+  doc["Valid"] = error == nullptr;
+  doc["Partial"] = status == "timeout" && raw.length() > 0;
+  if (error) doc["Error"] = error;
+  else doc["Error"] = nullptr;
+  // Length-aware serialization retains embedded NULs in malformed captures.
+  JsonString captured(raw.c_str(), raw.length());
+  doc["RawResponse"] = captured;
+  String payload;
+  serializeJson(doc, payload);
+  if (MqttManager::publishJson("godrej/counterdiagnostic/" + uniqueCode, payload)) {
+    g_lastPublishedDiagnosticAttempt = attempt;
+    g_diagnosticPublishAttempted = false;
+  }
+}
+
+static void publishLatestCounters(const String& uniqueCode) {
+  CounterProtocol::Reading reading;
+  uint32_t capturedAt;
+  uint32_t sequence;
+  time_t capturedEpoch;
+  if (!VendingSerial::latestReading(reading, capturedAt, &sequence, &capturedEpoch) ||
+      sequence == g_lastPublishedCounterSequence) return;
+  const uint32_t now = millis();
+  if (g_counterPublishAttempted && now - g_lastCounterPublishAttempt < 1000) return;
+  g_lastCounterPublishAttempt = now;
+  g_counterPublishAttempted = true;
+
+  MachineInfo info;
+  Storage::loadMachineInfo(info);
+  JsonDocument doc;
+  doc["MachineId"] = info.MachineId;
+  doc["UniqueCode"] = uniqueCode;
+  doc["RequestType"] = "Counter";
+  String temporary;
+  String permanent;
+  for (size_t i = 0; i < 15; ++i) {
+    if (i) { temporary += ','; permanent += ','; }
+    temporary += String(reading.temporary[i]);
+    permanent += String(reading.permanent[i]);
+  }
+  doc["TempCount"] = temporary;
+  doc["PermanentCount"] = permanent;
+  doc["OmittedSlot13"] = reading.omittedSlot13;
+  doc["CounterSequence"] = sequence;
+  doc["CapturedAtUptimeMs"] = capturedAt;
+  if (capturedEpoch) doc["CounterDateTime"] = TimeSync::format(capturedEpoch);
+  else doc["CounterDateTime"] = nullptr;
+  String payload;
+  serializeJson(doc, payload);
+  if (MqttManager::publishJson("godrej/sendcounter/" + uniqueCode, payload)) {
+    g_lastPublishedCounterSequence = sequence;
+    g_counterPublishAttempted = false;
+  }
+}
 
 static String getCurrentUniqueCode() {
   String uniqueCode;
@@ -73,15 +191,8 @@ static String buildInfoRequestJson() {
 }
 
 static bool tryGetDeviceDateTime(String& outDateTime) {
-  struct tm timeInfo;
-  if (!getLocalTime(&timeInfo, 10)) {
-    return false;
-  }
-
-  char buffer[24];
-  strftime(buffer, sizeof(buffer), "%d/%m/%Y, %H:%M:%S", &timeInfo);
-  outDateTime = buffer;
-  return true;
+  outDateTime = TimeSync::format(TimeSync::now(), "%d/%m/%Y, %H:%M:%S");
+  return outDateTime.length() > 0;
 }
 
 static String buildStatusDateTime() {
@@ -90,10 +201,7 @@ static String buildStatusDateTime() {
     return statusDateTime;
   }
 
-  // TODO: Enable once you finalize network time bootstrap for production.
-  // Example:
-  // configTime(19800, 0, "pool.ntp.org", "time.nist.gov");
-  return "18/03/2026, 11:05:24";
+  return "";
 }
 
 static String buildBootHeartbeatStatusJson() {
@@ -111,7 +219,9 @@ static String buildBootHeartbeatStatusJson() {
   statusData += ",\"ErrorLevel\":\"0\"";
   statusData += ",\"ErrorNo\":\"0\"";
   statusData += ",\"ErrorName\":\"BOOT_HEARTBEAT\"";
-  statusData += ",\"StatusDateTime\":\"" + buildStatusDateTime() + "\"";
+  String statusTime = buildStatusDateTime();
+  statusData += ",\"StatusDateTime\":";
+  statusData += statusTime.length() ? "\"" + statusTime + "\"" : String("null");
   statusData += ",\"RequestType\":\"Status\"";
   statusData += ",\"ButtonNo\":\"0\"";
   statusData += ",\"EmployeeCode\":\"\"";
@@ -125,7 +235,7 @@ static String buildBootHeartbeatStatusJson() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  TimeSync::begin();
   Serial.println();
   Serial.println("================================");
   Serial.println("SETUP STARTED");
@@ -134,6 +244,7 @@ void setup() {
   if (!Storage::begin()) {
     Serial.println("Storage initialization failed");
   }
+  VendingSerial::begin();
 
   // TEMP: Uncomment for one boot when you want to clear NVS and continue startup.
   // IMPORTANT: Comment it again after use, otherwise every boot will erase NVS.
@@ -147,6 +258,12 @@ void setup() {
   Serial.println(bleName);
   BLEManager::begin(bleName);
   Serial.println("BLE begin called");
+
+#if COUNTER_SERIAL_DIAGNOSTICS
+  // No Wi-Fi, cellular, or MQTT startup during the bench capture test.
+  // Stored settings are retained. The dedicated UART task handles polling.
+  return;
+#endif
 
   MachineInfo cached;
   if (Storage::loadMachineInfo(cached)) {
@@ -203,15 +320,36 @@ void setup() {
       WiFiManager::begin(WIFI_SSID, WIFI_PASS);
     }
   } else {
-    Serial.println("SIM mode selected. WiFi/MQTT over SIM is not implemented yet.");
+    WiFi.mode(WIFI_OFF);
+    CellularManager::begin();
+  }
+
+  if (isWifiMode()) {
+    TimeSync::startWifiSync();
+    mqtt.setClient(wifiClient);
+  } else {
+    mqtt.setClient(CellularManager::client());
   }
 
   MqttManager::begin(mqtt, g_mqttHost.c_str(), g_mqttPort,
                      hasCurrentUniqueCode() ? getCurrentUniqueCode() : getChipIdHex(),
                      g_mqttUser.c_str(), g_mqttPass.c_str());
+  // Main loop liveness only: network outages do not cause resets. A blocked
+  // task does. ESP.restart/watchdog/hardware RESET all preserve NVS settings.
+  g_watchdogActive = esp_task_wdt_init(RECOVERY_WATCHDOG_SECONDS, true) == ESP_OK &&
+                     esp_task_wdt_add(nullptr) == ESP_OK;
+  if (g_watchdogActive) VendingSerial::enableWatchdog();
 }
 
 void loop() {
+  feedRecoveryWatchdog();
+  VendingSerial::setPollingEnabled(!BLEManager::isMaintenanceMode());
+#if COUNTER_SERIAL_DIAGNOSTICS
+  ButtonManager::loop();
+  BLEManager::loop();
+  delay(10);
+  return;
+#endif
   static bool uniqueCodeMissingPrinted = false;
   static bool maintenancePauseApplied = false;
 
@@ -219,7 +357,8 @@ void loop() {
     if (!maintenancePauseApplied) {
       Serial.println("Maintenance mode active. Pausing WiFi/MQTT until reboot.");
       MqttManager::disconnect();
-      WiFiManager::disconnect();
+      if (isWifiMode()) WiFiManager::disconnect();
+      else CellularManager::disconnect();
       topicsSubscribed = false;
       infoRequestSent = false;
       bootHeartbeatSent = false;
@@ -235,16 +374,11 @@ void loop() {
 
   maintenancePauseApplied = false;
 
-  if (!isWifiMode()) {
-    ButtonManager::loop();
-    BLEManager::loop();
-    delay(10);
-    return;
-  }
+  if (isWifiMode()) WiFiManager::ensureConnected();
+  else CellularManager::ensureConnected();
+  feedRecoveryWatchdog();
 
-  WiFiManager::ensureConnected();
-
-  if (WiFiManager::isConnected()) {
+  if (isWifiMode() ? WiFiManager::isConnected() : CellularManager::isConnected()) {
     if (!hasCurrentUniqueCode()) {
       if (!uniqueCodeMissingPrinted) {
         Serial.println("UniqueCode not set. Waiting for BLE provisioning before MQTT connect.");
@@ -259,6 +393,7 @@ void loop() {
 
     uniqueCodeMissingPrinted = false;
     MqttManager::ensureConnected();
+    feedRecoveryWatchdog();
 
     if (MqttManager::isConnected()) {
       String uniqueCode = getCurrentUniqueCode();
@@ -267,13 +402,24 @@ void loop() {
         topicsSubscribed = true;
         infoRequestSent = false;
         bootHeartbeatSent = false;
+        // Skip snapshots captured offline and request a fresh one for this
+        // connection. An already pending read may complete after reconnect.
+        g_lastPublishedCounterSequence = VendingSerial::readingSequence();
+        g_counterPublishAttempted = false;
+        VendingSerial::requestCounterRead();
       }
 
       MqttManager::loop();
+      feedRecoveryWatchdog();
+      publishLatestCounters(uniqueCode);
+      feedRecoveryWatchdog();
+      publishCounterDiagnostic(uniqueCode);
+      feedRecoveryWatchdog();
 
       if (!bootHeartbeatSent) {
         String hb = buildBootHeartbeatStatusJson();
         bool ok = MqttManager::publishJson(topicSendStatus(uniqueCode), hb);
+        feedRecoveryWatchdog();
 
         Serial.print("Published Boot Heartbeat -> ");
         Serial.print(topicSendStatus(uniqueCode));
@@ -281,7 +427,7 @@ void loop() {
         Serial.println(ok ? "1" : "0");
         Serial.println(hb);
 
-        bootHeartbeatSent = true;
+        bootHeartbeatSent = ok;
       }
 
       if (Storage::isProvisioned()) {
@@ -293,6 +439,7 @@ void loop() {
       } else if (!infoRequestSent) {
         String payload = buildInfoRequestJson();
         bool ok = MqttManager::publishJson(topicSendInfo(uniqueCode), payload);
+        feedRecoveryWatchdog();
 
         Serial.print("Published Info Request -> ");
         Serial.print(topicSendInfo(uniqueCode));
@@ -300,7 +447,7 @@ void loop() {
         Serial.println(ok ? "1" : "0");
         Serial.println(payload);
 
-        infoRequestSent = true;
+        infoRequestSent = ok;
       }
     } else {
       topicsSubscribed = false;

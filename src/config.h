@@ -2,8 +2,40 @@
 #include <Arduino.h>
 
 #ifndef DEBUG_LOGS
-#define DEBUG_LOGS 1
+#define DEBUG_LOGS 0
 #endif
+
+// Temporary shared-UART diagnostics; enabled only by counter_diagnostic build.
+#ifndef COUNTER_SERIAL_DIAGNOSTICS
+#define COUNTER_SERIAL_DIAGNOSTICS 0
+#endif
+#ifndef MACHINE_STATUS_PROBE
+#define MACHINE_STATUS_PROBE 0
+#endif
+
+#if DEBUG_LOGS
+#error "UART0 RX/TX is reserved for the vending machine; serial debug logging must stay disabled."
+#endif
+
+// Dedicated vending UART defaults: yellow -> GPIO13 RX, green -> GPIO14 TX.
+// Black stays on GND; machine-end wiring is unchanged. BLE can override pins.
+static constexpr int VENDING_RX_PIN = 13;
+static constexpr int VENDING_TX_PIN = 14;
+static constexpr uint32_t VENDING_BAUD_RATE = 9600;
+static constexpr size_t VENDING_RX_BUFFER_SIZE = 1024;
+static constexpr uint32_t COUNTER_POLL_INTERVAL_MS = 10000;
+
+// Bharat Pi legacy 4G/A7672S: modem UART2 (not the vending UART0).
+static constexpr int MODEM_RX_PIN = 16;
+static constexpr int MODEM_TX_PIN = 17;
+static constexpr int MODEM_POWER_KEY_PIN = 32;
+static constexpr uint32_t MODEM_BAUD_RATE = 115200;
+// Blank APN preserves the modem/carrier PDP profile. Override via BLE if needed.
+static const char* SIM_APN = "";
+static const char* SIM_APN_USER = "";
+static const char* SIM_APN_PASS = "";
+static const char* SIM_PIN = "";
+static constexpr uint32_t RECOVERY_WATCHDOG_SECONDS = 60;
 
 #if !DEBUG_LOGS
 class DebugSerialProxy {
@@ -23,7 +55,7 @@ class DebugSerialProxy {
   size_t printf(const char*, Args...) { return 0; }
 };
 
-inline DebugSerialProxy DebugSerial;
+static DebugSerialProxy DebugSerial;
 #define Serial DebugSerial
 #endif
 
@@ -58,11 +90,13 @@ inline String topicGetInfo() { return "godrej/getinfo/" + String(UNIQUE_CODE); }
 inline String topicSendInfo(){ return "godrej/sendinfo/" + String(UNIQUE_CODE); }
 inline String topicSendStatus(){ return "godrej/sendstatus/" + String(UNIQUE_CODE); }
 
-// -------- Reset Button (hardware long-press) --------
+// -------- Optional extra GPIO reboot button --------
+// The onboard RESET button already resets EN directly, even if firmware hangs.
+// It needs no GPIO assignment and preserves NVS. Do not repurpose BOOT/GPIO0.
 // NOTE: Set this to the GPIO connected to your button.
 // Keep GPIO0 only as a last resort because it is a boot strapping pin on ESP32.
 // Use a safer free GPIO such as 12/13/14/27 when available.
 static const int RESET_BUTTON_PIN = -1;             // disabled until a safe GPIO is assigned
 static const bool RESET_BUTTON_ACTIVE_LOW = true;   // most buttons pull to GND
-static const uint32_t LONG_PRESS_MS = 5000;         // 5 sec = factory reset
+static const uint32_t LONG_PRESS_MS = 5000;         // 5 sec = reboot, settings preserved
 static const uint32_t SHORT_PRESS_MS = 500;         // 0.5 sec = reboot

@@ -2,15 +2,24 @@
 #include "config.h"
 #include "storage.h"
 #include "machine_info.h"
+#include "vending_serial.h"
+#include "counter_protocol.h"
+#include "cellular_manager.h"
+#include "time_sync.h"
+#include "vending_uart_config.h"
+#include <atomic>
+#include <ArduinoJson.h>
 
 #include <NimBLEDevice.h>
 #include "esp_system.h"
 #include "esp_bt.h"
 
 static NimBLECharacteristic* g_tx = nullptr;
+static NimBLECharacteristic* g_counterResult = nullptr;
+static NimBLECharacteristic* g_counterRaw = nullptr;
 static NimBLEServer* g_server = nullptr;
 static bool g_connected = false;
-static bool g_maintenanceMode = false;
+static std::atomic<bool> g_maintenanceMode{false};
 static constexpr uint16_t INVALID_CONN_HANDLE = 0xFFFF;
 static uint16_t g_connHandle = INVALID_CONN_HANDLE;
 
@@ -51,6 +60,8 @@ static String buildStatusJson() {
   bool hasInfo = Storage::loadMachineInfo(info);
 
   String json = "{";
+  json += "\"cellularStatus\":\"" + String(CellularManager::status()) + "\",";
+  json += "\"timeSynced\":" + String(TimeSync::isValid() ? "true" : "false") + ",";
   json += "\"provisioned\":";
   json += (Storage::isProvisioned() ? "true" : "false");
   json += ",\"maintenanceMode\":";
@@ -92,6 +103,15 @@ static String buildSettingsJson() {
   json += ",\"mqttPort\":\"" + String(mqttPort) + "\"";
   json += ",\"mqttUsername\":\"" + mqttUser + "\"";
   json += ",\"mqttPassword\":\"" + mqttPass + "\"";
+  String apn = SIM_APN, user = SIM_APN_USER, password = SIM_APN_PASS, pin = SIM_PIN;
+  Storage::loadSimSettings(apn, user, password, pin);
+  json += ",\"simApn\":\"" + apn + "\"";
+  json += ",\"simCredentialsConfigured\":" + String(user.length() ? "true" : "false");
+  json += ",\"simPinConfigured\":" + String(pin.length() ? "true" : "false");
+  int rxPin = VENDING_RX_PIN, txPin = VENDING_TX_PIN;
+  Storage::loadVendingUart(rxPin, txPin);
+  json += ",\"vendingRxPin\":" + String(rxPin);
+  json += ",\"vendingTxPin\":" + String(txPin);
   json += "}";
   return json;
 }
@@ -356,6 +376,47 @@ static void handleUpdateAll(const String& cmd) {
   BLEManager::notifyText("{\"ok\":true,\"msg\":\"All settings saved. Reboot required\"}");
 }
 
+static void handleSetSim(const String& cmd) {
+  if (!ensureMaintenanceMode("SET_SIM")) return;
+  String fields[4];
+  int start = 8; // SET_SIM:
+  for (int i = 0; i < 4; ++i) {
+    int delimiter = cmd.indexOf('|', start);
+    if ((i < 3 && delimiter < 0) || (i == 3 && delimiter >= 0)) {
+      BLEManager::notifyText("{\"ok\":false,\"msg\":\"Use SET_SIM:apn|user|password|pin\"}");
+      return;
+    }
+    fields[i] = i < 3 ? cmd.substring(start, delimiter) : cmd.substring(start);
+    if (fields[i].length() > (i == 0 ? 100 : 64)) {
+      BLEManager::notifyText("{\"ok\":false,\"msg\":\"SIM field too long\"}");
+      return;
+    }
+    for (size_t n = 0; n < fields[i].length(); ++n) {
+      char c = fields[i][n];
+      if (c < 32 || c > 126 || c == '"' || c == '\\') {
+        BLEManager::notifyText("{\"ok\":false,\"msg\":\"SIM field contains invalid characters\"}");
+        return;
+      }
+    }
+    start = delimiter + 1;
+  }
+  if (fields[3].length()) {
+    if (fields[3].length() < 4 || fields[3].length() > 8) {
+      BLEManager::notifyText("{\"ok\":false,\"msg\":\"SIM PIN must be 4-8 digits\"}");
+      return;
+    }
+    for (char c : fields[3]) {
+      if (c < '0' || c > '9') {
+        BLEManager::notifyText("{\"ok\":false,\"msg\":\"SIM PIN must contain digits\"}");
+        return;
+      }
+    }
+  }
+  bool ok = Storage::saveSimSettings(fields[0], fields[1], fields[2], fields[3]);
+  BLEManager::notifyText(ok ? "{\"ok\":true,\"msg\":\"SIM settings saved. Reboot required\"}"
+                           : "{\"ok\":false,\"msg\":\"SIM settings save failed\"}");
+}
+
 static void handleDisconnect() {
   BLEManager::notifyText("{\"status\":\"disconnecting\"}");
 
@@ -398,6 +459,54 @@ class RxCB : public NimBLECharacteristicCallbacks {
     String cmd = String(value.c_str());
     cmd.trim();
 
+    if (cmd.equalsIgnoreCase("GET_VENDING_UART")) {
+      int rx = VENDING_RX_PIN, tx = VENDING_TX_PIN;
+      Storage::loadVendingUart(rx, tx);
+      JsonDocument doc;
+      doc["vendingRxPin"] = rx;
+      doc["vendingTxPin"] = tx;
+      doc["activeRxPin"] = VendingSerial::activeRxPin();
+      doc["activeTxPin"] = VendingSerial::activeTxPin();
+      doc["baudRate"] = VENDING_BAUD_RATE;
+      doc["uartReady"] = VendingSerial::isReady();
+      doc["rebootRequired"] = rx != VendingSerial::activeRxPin() || tx != VendingSerial::activeTxPin();
+      String json;
+      serializeJson(doc, json);
+      BLEManager::notifyText(json);
+      return;
+    }
+    if (cmd.startsWith("SET_VENDING_UART:")) {
+      if (!ensureMaintenanceMode("SET_VENDING_UART")) return;
+      String payload = cmd.substring(17);
+      int separator = payload.indexOf('|');
+      String rxText = separator > 0 ? payload.substring(0, separator) : "";
+      String txText = separator > 0 ? payload.substring(separator + 1) : "";
+      const auto gpioText = [](const String& text) {
+        if (text.length() == 0 || text.length() > 2) return false;
+        for (size_t i = 0; i < text.length(); ++i)
+          if (text[i] < '0' || text[i] > '9') return false;
+        return true;
+      };
+      if (!gpioText(rxText) || !gpioText(txText) ||
+          !VendingUartConfig::valid(rxText.toInt(), txText.toInt())) {
+        BLEManager::notifyText("{\"ok\":false,\"msg\":\"Use distinct GPIOs from 13,14,21,22,27,33 or legacy RX3|TX1\"}");
+        return;
+      }
+      bool saved = Storage::saveVendingUart(rxText.toInt(), txText.toInt());
+      BLEManager::notifyText(saved
+          ? "{\"ok\":true,\"msg\":\"Vending UART saved. Reboot required\"}"
+          : "{\"ok\":false,\"msg\":\"Vending UART save failed\"}");
+      return;
+    }
+
+    if (cmd.equalsIgnoreCase("READ_COUNTER_ONCE")) {
+      bool queued = VendingSerial::requestCounterRead();
+      BLEManager::notifyText(queued
+          ? "{\"ok\":true,\"msg\":\"Counter read queued\"}"
+          : "{\"ok\":false,\"msg\":\"Counter read busy\"}");
+      return;
+    }
+
     Serial.print("BLE RX: ");
     Serial.println(cmd);
 
@@ -424,6 +533,7 @@ class RxCB : public NimBLECharacteristicCallbacks {
 
     if (cmd.equalsIgnoreCase("MAINTENANCE_ON")) {
       g_maintenanceMode = true;
+      VendingSerial::setPollingEnabled(false);
       Serial.println("BLE maintenance mode: ON");
       BLEManager::notifyText("{\"ok\":true,\"msg\":\"Maintenance mode enabled\"}");
       return;
@@ -453,6 +563,7 @@ class RxCB : public NimBLECharacteristicCallbacks {
     }
 
     if (cmd.equalsIgnoreCase("RESET")) {
+      if (!ensureMaintenanceMode("RESET")) return;
       BLEManager::notifyText("{\"ok\":true,\"msg\":\"Factory reset\"}");
       delay(200);
       BLEManager::release();
@@ -462,6 +573,11 @@ class RxCB : public NimBLECharacteristicCallbacks {
 
     if (cmd.startsWith("SET_MODE:")) {
       handleSetMode(cmd);
+      return;
+    }
+
+    if (cmd.startsWith("SET_SIM:")) {
+      handleSetSim(cmd);
       return;
     }
 
@@ -508,6 +624,15 @@ void begin(const String& deviceName) {
     NIMBLE_PROPERTY::NOTIFY
   );
 
+  // READ supports a long GATT read, avoiding notification MTU truncation.
+  g_counterResult = svc->createCharacteristic(
+    "6E400004-B5A3-F393-E0A9-E50E24DCCA9E", NIMBLE_PROPERTY::READ
+  );
+  g_counterResult->setValue("{\"status\":\"idle\",\"bytes\":0}");
+  g_counterRaw = svc->createCharacteristic(
+    "6E400005-B5A3-F393-E0A9-E50E24DCCA9E", NIMBLE_PROPERTY::READ
+  );
+  g_counterRaw->setValue("");
   svc->start();
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -527,6 +652,38 @@ void begin(const String& deviceName) {
 }
 
 void loop() {
+  String status;
+  String raw;
+  if (VendingSerial::takeResult(status, raw) && g_counterResult) {
+    JsonDocument doc;
+    doc["status"] = status;
+    doc["bytes"] = raw.length();
+    if (status == "complete") {
+      CounterProtocol::Reading reading;
+      const char* error = CounterProtocol::parse(raw.c_str(), raw.length(), reading);
+      doc["valid"] = error == nullptr;
+      if (error) {
+        doc["error"] = error;
+      } else {
+        doc["omittedSlot13"] = reading.omittedSlot13;
+        JsonArray temporary = doc["temporary"].to<JsonArray>();
+        JsonArray permanent = doc["permanent"].to<JsonArray>();
+        for (size_t i = 0; i < 15; ++i) {
+          temporary.add(reading.temporary[i]);
+          permanent.add(reading.permanent[i]);
+        }
+      }
+    } else {
+      doc["valid"] = false;
+    }
+    String json;
+    serializeJson(doc, json);
+    // Keep raw bytes separate so a maximum-size capture fits GATT's 512-byte
+    // attribute limit without JSON escaping expanding it.
+    g_counterRaw->setValue(reinterpret_cast<const uint8_t*>(raw.c_str()), raw.length());
+    g_counterResult->setValue(json.c_str());
+    notifyText("{\"event\":\"counter_read_finished\"}");
+  }
 }
 
 bool isConnected() {

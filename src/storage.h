@@ -24,4 +24,8 @@ namespace Storage {
 
   bool saveMqttSettings(const String& host, uint16_t port, const String& user, const String& pass);
   bool loadMqttSettings(String& outHost, uint16_t& outPort, String& outUser, String& outPass);
+  bool saveSimSettings(const String& apn, const String& user, const String& pass, const String& pin);
+  bool loadSimSettings(String& apn, String& user, String& pass, String& pin);
+  bool saveVendingUart(int rx, int tx);
+  bool loadVendingUart(int& rx, int& tx);
 }

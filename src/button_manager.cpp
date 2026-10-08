@@ -1,6 +1,5 @@
 #include "button_manager.h"
 #include "ble_manager.h"
-#include "storage.h"
 #include "config.h" 
 
 static int g_pin = -1;
@@ -49,13 +48,13 @@ void loop() {
     g_handledLong = false;
   }
 
-  // while pressed: check long press
+  // Both short and long presses reboot. No button gesture erases settings.
   if (pressed && g_pressedAt > 0 && !g_handledLong) {
     if (now - g_pressedAt >= LONG_PRESS_MS) {
       g_handledLong = true;
-      Serial.println("🔴 Long press detected → FACTORY RESET");
+      Serial.println("Long press detected: reboot (settings preserved)");
       BLEManager::release();
-      Storage::factoryReset(true); // clears NVS + reboots
+      ESP.restart();
     }
   }
 
