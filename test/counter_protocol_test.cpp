@@ -1,6 +1,5 @@
 // Host test: compile with src/counter_protocol.cpp using a C++11 compiler.
 #include "../src/counter_protocol.h"
-#include "../src/vending_uart_config.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string>
@@ -21,15 +20,6 @@ static const char* parse(const std::string& input, CounterProtocol::Reading& res
   return CounterProtocol::parse(input.data(), input.size(), result);
 }
 int main() {
-  assert(VendingUartConfig::valid(3, 1));
-  assert(VendingUartConfig::valid(13, 14));
-  assert(VendingUartConfig::valid(14, 13));
-  assert(!VendingUartConfig::valid(13, 13));
-  assert(!VendingUartConfig::valid(16, 17));
-  assert(!VendingUartConfig::valid(6, 7));
-  assert(!VendingUartConfig::valid(0, 12));
-  assert(!VendingUartConfig::valid(34, 35));
-  assert(!VendingUartConfig::valid(3, 14));
   CounterProtocol::Reading result;
   const std::string sample = "*1C,30,00001,00001,00000,00000,00000,00000,00000,00000,00000,00000,00000,00000,00000,00000,00000,00000,00000,00000,00000,00000,00001,00001,00000,00000,00000,00000,00002,00002,00004,00004,b5";
   assert(!parse(sample, result));

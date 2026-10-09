@@ -6,7 +6,6 @@
 #include "counter_protocol.h"
 #include "cellular_manager.h"
 #include "time_sync.h"
-#include "vending_uart_config.h"
 #include <atomic>
 #include <ArduinoJson.h>
 
@@ -108,10 +107,6 @@ static String buildSettingsJson() {
   json += ",\"simApn\":\"" + apn + "\"";
   json += ",\"simCredentialsConfigured\":" + String(user.length() ? "true" : "false");
   json += ",\"simPinConfigured\":" + String(pin.length() ? "true" : "false");
-  int rxPin = VENDING_RX_PIN, txPin = VENDING_TX_PIN;
-  Storage::loadVendingUart(rxPin, txPin);
-  json += ",\"vendingRxPin\":" + String(rxPin);
-  json += ",\"vendingTxPin\":" + String(txPin);
   json += "}";
   return json;
 }
@@ -458,46 +453,6 @@ class RxCB : public NimBLECharacteristicCallbacks {
     std::string value = c->getValue();
     String cmd = String(value.c_str());
     cmd.trim();
-
-    if (cmd.equalsIgnoreCase("GET_VENDING_UART")) {
-      int rx = VENDING_RX_PIN, tx = VENDING_TX_PIN;
-      Storage::loadVendingUart(rx, tx);
-      JsonDocument doc;
-      doc["vendingRxPin"] = rx;
-      doc["vendingTxPin"] = tx;
-      doc["activeRxPin"] = VendingSerial::activeRxPin();
-      doc["activeTxPin"] = VendingSerial::activeTxPin();
-      doc["baudRate"] = VENDING_BAUD_RATE;
-      doc["uartReady"] = VendingSerial::isReady();
-      doc["rebootRequired"] = rx != VendingSerial::activeRxPin() || tx != VendingSerial::activeTxPin();
-      String json;
-      serializeJson(doc, json);
-      BLEManager::notifyText(json);
-      return;
-    }
-    if (cmd.startsWith("SET_VENDING_UART:")) {
-      if (!ensureMaintenanceMode("SET_VENDING_UART")) return;
-      String payload = cmd.substring(17);
-      int separator = payload.indexOf('|');
-      String rxText = separator > 0 ? payload.substring(0, separator) : "";
-      String txText = separator > 0 ? payload.substring(separator + 1) : "";
-      const auto gpioText = [](const String& text) {
-        if (text.length() == 0 || text.length() > 2) return false;
-        for (size_t i = 0; i < text.length(); ++i)
-          if (text[i] < '0' || text[i] > '9') return false;
-        return true;
-      };
-      if (!gpioText(rxText) || !gpioText(txText) ||
-          !VendingUartConfig::valid(rxText.toInt(), txText.toInt())) {
-        BLEManager::notifyText("{\"ok\":false,\"msg\":\"Use distinct GPIOs from 13,14,21,22,27,33 or legacy RX3|TX1\"}");
-        return;
-      }
-      bool saved = Storage::saveVendingUart(rxText.toInt(), txText.toInt());
-      BLEManager::notifyText(saved
-          ? "{\"ok\":true,\"msg\":\"Vending UART saved. Reboot required\"}"
-          : "{\"ok\":false,\"msg\":\"Vending UART save failed\"}");
-      return;
-    }
 
     if (cmd.equalsIgnoreCase("READ_COUNTER_ONCE")) {
       bool queued = VendingSerial::requestCounterRead();

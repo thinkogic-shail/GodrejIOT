@@ -18,7 +18,7 @@
 #endif
 
 // Dedicated vending UART defaults: yellow -> GPIO13 RX, green -> GPIO14 TX.
-// Black stays on GND; machine-end wiring is unchanged. BLE can override pins.
+// Black stays on GND; machine-end wiring is unchanged. Pins are fixed.
 static constexpr int VENDING_RX_PIN = 13;
 static constexpr int VENDING_TX_PIN = 14;
 static constexpr uint32_t VENDING_BAUD_RATE = 9600;

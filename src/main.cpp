@@ -13,7 +13,6 @@
 #include "button_manager.h"
 #include "vending_serial.h"
 #include "machine_status_messages.h"
-#include "machine_status_messages.h"
 #include "cellular_manager.h"
 #include "time_sync.h"
 #include <esp_task_wdt.h>
@@ -44,46 +43,46 @@ static void feedRecoveryWatchdog() {
 static void publishCounterDiagnostic(const String& uniqueCode) {
   const uint32_t now = millis();
   if (g_diagnosticPublishAttempted && now - g_lastDiagnosticPublishAt < 1000) return;
-  String status, raw;
+  String status, raw, echoRaw, rinseAction;
+  bool machineStatus = false;
+  uint32_t echoCount = 0;
   uint32_t attempt, finishedAt;
   time_t epoch;
-  if (!VendingSerial::latestResult(status, raw, attempt, finishedAt, epoch) ||
+  if (!VendingSerial::latestResult(status, raw, attempt, finishedAt, epoch,
+                                  &echoCount, &echoRaw, &machineStatus, &rinseAction) ||
       attempt == g_lastPublishedDiagnosticAttempt) return;
   g_diagnosticPublishAttempted = true;
   g_lastDiagnosticPublishAt = now;
   CounterProtocol::Reading reading;
-#if MACHINE_STATUS_PROBE
   uint32_t level = 0, number = 0;
-  const char* error = status == "complete"
-      ? CounterProtocol::parseMachineStatus(raw.c_str(), raw.length(), level, number)
-      : status.c_str();
-#else
-  const char* error = status == "complete"
-      ? CounterProtocol::parse(raw.c_str(), raw.length(), reading)
-      : status.c_str();
-#endif
+  const char* error = status != "complete" ? status.c_str() :
+      (machineStatus
+          ? CounterProtocol::parseMachineStatus(raw.c_str(), raw.length(), level, number)
+          : CounterProtocol::parse(raw.c_str(), raw.length(), reading));
   JsonDocument doc;
   doc["UniqueCode"] = uniqueCode;
-#if MACHINE_STATUS_PROBE
-  doc["RequestType"] = "MachineStatusDiagnostic";
-  doc["Command"] = "MACHINE_STATUS";
-  doc["SentCommand"] = "*1,E,r,1,0,5B\\r";
-  if (!error) {
-    doc["ErrorLevel"] = level;
-    doc["ErrorNumber"] = number;
-    doc["MachineMessage"] = machineStatusMessage(level, number);
-    doc["MachineMessage"] = machineStatusMessage(level, number);
+  doc["RequestType"] = machineStatus ? "MachineStatusDiagnostic" : "CounterDiagnostic";
+  doc["Command"] = machineStatus ? "MACHINE_STATUS" : "READ_ALL_BOTH_COUNTERS";
+  if (machineStatus) {
+    doc["SentCommand"] = "*1,E,r,1,0,5B\\r";
+    doc["AutoRinseAction"] = rinseAction;
+    if (rinseAction == "sent" || rinseAction == "write_failed")
+      doc["RinseCommand"] = "*1,D,w,1,100,5E\\r";
+    if (!error) {
+      doc["ErrorLevel"] = level;
+      doc["ErrorNumber"] = number;
+      doc["MachineMessage"] = machineStatusMessage(level, number);
+    }
   }
-#else
-  doc["RequestType"] = "CounterDiagnostic";
-  doc["Command"] = "READ_ALL_BOTH_COUNTERS";
-#endif
   doc["AttemptSequence"] = attempt;
   doc["CapturedAtUptimeMs"] = finishedAt;
   if (epoch) doc["CapturedDateTime"] = TimeSync::format(epoch);
   else doc["CapturedDateTime"] = nullptr;
   doc["Status"] = status;
   doc["ReceivedBytes"] = raw.length();
+  doc["EchoCount"] = echoCount;
+  doc["EchoBytes"] = echoCount * echoRaw.length();
+  doc["RawEcho"] = echoRaw;
   doc["RxPin"] = VendingSerial::activeRxPin();
   doc["TxPin"] = VendingSerial::activeTxPin();
   doc["Valid"] = error == nullptr;

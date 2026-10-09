@@ -1,8 +1,9 @@
 #include "vending_serial.h"
 #include "config.h"
 #include <atomic>
+#include <cstring>
 #include "time_sync.h"
-#include "storage.h"
+#include "auto_rinse_policy.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <esp_task_wdt.h>
@@ -12,9 +13,9 @@
 #undef Serial
 
 static HardwareSerial g_dedicatedUart(1);
-static HardwareSerial* g_uart = &Serial;
-static int g_rxPin = VENDING_RX_PIN;
-static int g_txPin = VENDING_TX_PIN;
+static HardwareSerial* const g_uart = &g_dedicatedUart;
+static constexpr int g_rxPin = VENDING_RX_PIN;
+static constexpr int g_txPin = VENDING_TX_PIN;
 
 static bool g_ready = false;
 static std::atomic<bool> g_requested{false};
@@ -24,6 +25,10 @@ static uint32_t g_sentAt = 0;
 static String g_raw;
 static String g_status;
 static String g_resultRaw;
+static String g_bleStatus;
+static String g_bleRaw;
+static uint32_t g_echoCount = 0;
+static uint32_t g_resultEchoCount = 0;
 static std::atomic<bool> g_pollingEnabled{false};
 static std::atomic<bool> g_watchdogRequested{false};
 static SemaphoreHandle_t g_mutex = nullptr;
@@ -37,32 +42,86 @@ static uint32_t g_readingSequence = 0;
 static uint32_t g_attemptSequence = 0;
 static uint32_t g_finishedAt = 0;
 static time_t g_finishedEpoch = 0;
-static constexpr uint32_t RESPONSE_TIMEOUT_MS = 2000;
+// Temporary diagnostic window to rule out delayed vending-machine replies.
+static constexpr uint32_t RESPONSE_TIMEOUT_MS = 5000;
 static constexpr size_t MAX_RESPONSE_BYTES = 512;
-#if MACHINE_STATUS_PROBE
-static constexpr char COUNTER_REQUEST[] = "*1,E,r,1,0,5B\r";
-#else
 static constexpr char COUNTER_REQUEST[] = "*1,C,r,2,3,0,75\r";
-#endif
+static constexpr char STATUS_REQUEST[] = "*1,E,r,1,0,5B\r";
+static constexpr char RINSE_REQUEST[] = "*1,D,w,1,100,5E\r";
+static bool g_isStatus = MACHINE_STATUS_PROBE;
+static bool g_resultIsStatus = false;
+static bool g_statusDue = false;
+static uint32_t g_counterFinishedAt = 0;
+static bool g_rinseLatched = false;
+static bool g_hasRinsed = false;
+static uint32_t g_lastRinseAt = 0;
+static String g_rinseAction;
+static const char* activeRequest() {
+  return g_isStatus ? STATUS_REQUEST : COUNTER_REQUEST;
+}
 
 static void finish(const char* status) {
   g_waiting = false;
   g_status = status;
   g_resultRaw = g_raw;
+  g_resultEchoCount = g_echoCount;
   ++g_attemptSequence;
   g_finishedAt = millis();
   g_finishedEpoch = TimeSync::now();
-  g_latestValid = g_status == "complete" &&
-      CounterProtocol::parse(g_raw.c_str(), g_raw.length(), g_latest) == nullptr;
-  if (g_latestValid) {
-    g_capturedAt = millis();
-    g_capturedEpoch = TimeSync::now();
-    ++g_readingSequence;
+  g_resultIsStatus = g_isStatus;
+  g_rinseAction = "none";
+  if (g_isStatus) {
+    uint32_t level = 0, number = 0;
+    const bool valid = g_status == "complete" &&
+        CounterProtocol::parseMachineStatus(g_raw.c_str(), g_raw.length(),
+                                           level, number) == nullptr;
+    const auto action = AutoRinsePolicy::decide(valid, level, number,
+        g_pollingEnabled.load(), g_rinseLatched, g_hasRinsed,
+        millis() - g_lastRinseAt);
+    if (action != AutoRinsePolicy::Action::None) {
+      if (action == AutoRinsePolicy::Action::Clear) {
+        g_rinseLatched = false;
+      } else if (action == AutoRinsePolicy::Action::Paused) {
+        g_rinseAction = "maintenance_paused";
+      } else if (action == AutoRinsePolicy::Action::AlreadyAttempted) {
+        g_rinseAction = "already_attempted";
+      } else if (action == AutoRinsePolicy::Action::Cooldown) {
+        g_rinseAction = "cooldown";
+      } else {
+        // Latch even on write failure: never blindly repeat an actuator command.
+        g_rinseLatched = true;
+        g_hasRinsed = true;
+        g_lastRinseAt = millis();
+        const size_t length = sizeof(RINSE_REQUEST) - 1;
+        g_rinseAction = g_uart->write(
+            reinterpret_cast<const uint8_t*>(RINSE_REQUEST), length) == length
+                ? "sent" : "write_failed";
+        g_uart->flush();
+      }
+    }
   } else {
-    g_latest = CounterProtocol::Reading{};
-    g_capturedEpoch = 0;
+    g_latestValid = g_status == "complete" &&
+        CounterProtocol::parse(g_raw.c_str(), g_raw.length(), g_latest) == nullptr;
+    if (g_latestValid) {
+      g_capturedAt = millis();
+      g_capturedEpoch = TimeSync::now();
+      ++g_readingSequence;
+    } else {
+      g_latest = CounterProtocol::Reading{};
+      g_capturedEpoch = 0;
+    }
+    g_resultPending = true;
+#if !COUNTER_SERIAL_DIAGNOSTICS
+    g_statusDue = true;
+    g_counterFinishedAt = millis();
+#endif
   }
-  g_resultPending = true;
+  g_isStatus = MACHINE_STATUS_PROBE;
+  if (!g_resultIsStatus || MACHINE_STATUS_PROBE) {
+    g_bleStatus = g_status;
+    g_bleRaw = g_resultRaw;
+    g_resultPending = true;
+  }
   g_requested.store(false);
 #if COUNTER_SERIAL_DIAGNOSTICS
   // Capture is finished before printing. This output also reaches VMC RX.
@@ -82,6 +141,8 @@ static void finish(const char* status) {
     else Serial.printf("\\x%02X", value);
   }
   Serial.println();
+  Serial.printf("[COUNTER ECHO] skipped=%lu\r\n",
+                static_cast<unsigned long>(g_resultEchoCount));
   if (error) Serial.printf("[COUNTER ERROR] %s\r\n", error);
   Serial.println("[COUNTER END]");
   Serial.flush();
@@ -109,10 +170,8 @@ static void serialTask(void*) {
 namespace VendingSerial {
 bool begin() {
   if (g_ready) return true;
-  Storage::loadVendingUart(g_rxPin, g_txPin);
-  g_uart = (g_rxPin == 3 && g_txPin == 1) ? &Serial : &g_dedicatedUart;
   Serial.setDebugOutput(false);
-  if (g_uart != &Serial) Serial.begin(VENDING_BAUD_RATE);
+  Serial.begin(VENDING_BAUD_RATE);
   if (g_uart->setRxBufferSize(VENDING_RX_BUFFER_SIZE) == 0) return false;
   g_uart->begin(VENDING_BAUD_RATE, SERIAL_8N1, g_rxPin, g_txPin);
   if (!*g_uart) return false;
@@ -153,15 +212,28 @@ bool requestCounterRead() {
 void loop() {
   StateLock lock;
   const uint32_t now = millis();
+  if (!g_waiting && g_hasRinsed && now - g_lastRinseAt < 3000) return;
   if (g_ready && g_pollingEnabled && !g_requested.load() &&
       (!g_hasStarted || now - g_lastStartedAt >= COUNTER_POLL_INTERVAL_MS)) {
+    g_isStatus = MACHINE_STATUS_PROBE;
+    g_statusDue = false;
+    requestCounterRead();
+  }
+  if (g_statusDue && g_pollingEnabled && !g_requested.load() &&
+      now - g_counterFinishedAt >= 1500) {
+    g_statusDue = false;
+    g_isStatus = true;
     requestCounterRead();
   }
   if (!g_requested.load()) return;
   if (!g_waiting) {
-    g_lastStartedAt = now;
-    g_hasStarted = true;
+    // Explicit BLE reads remain counter reads in the normal environment.
+    if (!g_isStatus || MACHINE_STATUS_PROBE) {
+      g_lastStartedAt = now;
+      g_hasStarted = true;
+    }
     g_raw = "";
+    g_echoCount = 0;
     if (!g_ready) {
       finish("uart_not_ready");
       return;
@@ -169,8 +241,10 @@ void loop() {
     // Bounded drain: do not wait indefinitely on unsolicited input.
     const int staleBytes = g_uart->available();
     for (int i = 0; i < staleBytes; ++i) g_uart->read();
-    if (g_uart->write(reinterpret_cast<const uint8_t*>(COUNTER_REQUEST),
-                     sizeof(COUNTER_REQUEST) - 1) != sizeof(COUNTER_REQUEST) - 1) {
+    const char* request = activeRequest();
+    const size_t requestLength = strlen(request);
+    if (g_uart->write(reinterpret_cast<const uint8_t*>(request),
+                     requestLength) != requestLength) {
       finish("write_failed");
       return;
     }
@@ -185,6 +259,15 @@ void loop() {
     char c = static_cast<char>(value);
     if (c == '\r' || c == '\n') {
       if (g_raw.isEmpty()) continue;
+      // Some interfaces echo the request before returning the machine frame.
+      // Match the entire frame exactly, excluding the request's final CR.
+      // Keep the original deadline: echoes must not extend the timeout.
+      if (g_raw.length() == strlen(activeRequest()) - 1 &&
+          memcmp(g_raw.c_str(), activeRequest(), g_raw.length()) == 0) {
+        ++g_echoCount;
+        g_raw = "";
+        continue;
+      }
       finish("complete");
       return;
     }
@@ -201,14 +284,16 @@ bool takeResult(String& status, String& raw) {
   if (!g_mutex) return false;
   StateLock lock;
   if (!g_resultPending) return false;
-  status = g_status;
-  raw = g_resultRaw;
+  status = g_bleStatus;
+  raw = g_bleRaw;
   g_resultPending = false;
   return true;
 }
 
 bool latestResult(String& status, String& raw, uint32_t& attempt,
-                  uint32_t& finishedAt, time_t& finishedEpoch) {
+                  uint32_t& finishedAt, time_t& finishedEpoch,
+                  uint32_t* echoCount, String* echoRaw,
+                  bool* machineStatus, String* rinseAction) {
   if (!g_mutex) return false;
   StateLock lock;
   if (!g_attemptSequence) return false;
@@ -217,6 +302,13 @@ bool latestResult(String& status, String& raw, uint32_t& attempt,
   attempt = g_attemptSequence;
   finishedAt = g_finishedAt;
   finishedEpoch = g_finishedEpoch;
+  if (echoCount) *echoCount = g_resultEchoCount;
+  if (machineStatus) *machineStatus = g_resultIsStatus;
+  if (rinseAction) *rinseAction = g_rinseAction;
+  if (echoRaw) {
+    const String request(g_resultIsStatus ? STATUS_REQUEST : COUNTER_REQUEST);
+    *echoRaw = g_resultEchoCount ? request.substring(0, request.length() - 1) : String();
+  }
   return true;
 }
 

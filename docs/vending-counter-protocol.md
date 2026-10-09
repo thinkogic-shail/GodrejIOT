@@ -57,7 +57,7 @@ The diagram is structural only; literal response header values and the trailing 
 DatabaseHelper.updateBeverageCounter clarifies downstream mapping:
 - Slots 1-12: button temporary/permanent counts.
 - Slot 13: skipped by the database update.
-- Slots 14-15: totals. Preserve both pairs; exact business meanings require further evidence.
+- Slots 1-14: beverage/button counters; slot 14 is hot water, as confirmed for this machine. Slot 15 contains the total temporary/permanent pair.
 
 Android does not establish response checksum rules or validate response header identity. Do not claim checksum validation until confirmed using a real response or protocol specification.
 
@@ -105,7 +105,7 @@ Decoded sample pairs (temporary, permanent):
 - Slot 14: (2, 2)
 - Slot 15: (4, 4)
 
-The supplied response diagram includes an illustrative data field 40 and length 3, unlike the concrete all-counter sample. For READ_ALL_BOTH_COUNTERS, use the concrete sample and Android parser mapping; do not insert an extra 40 field. Exact business meanings of totals in slots 14-15 remain unspecified.
+The supplied response diagram includes an illustrative data field 40 and length 3, unlike the concrete all-counter sample. For READ_ALL_BOTH_COUNTERS, use the concrete sample and Android parser mapping; do not insert an extra 40 field. Slot 14 is hot water; slot 15 is the total temporary/permanent pair, as confirmed for this machine.
 
 Planned validation: expected *1C prefix, declared numeric field count matching actual count, supported 28/30 count, numeric counters, valid checksum, CR termination, timeout and overflow handling. The 28-value variant is supported by Android but has not yet been supplied as a real response sample.
 
@@ -177,7 +177,7 @@ Payload contract (example values from supplied response):
 }
 ```
 
-TempCount/PermanentCount are CSV strings with exactly 15 slots, matching Android model naming. Slots 1-12 represent buttons; slot 13 is preserved or zero-filled and explicitly flagged if omitted; slots 14-15 are totals. MachineId is 0 if backend machine provisioning is not yet available. UniqueCode remains required for MQTT connection.
+TempCount/PermanentCount are CSV strings with exactly 15 slots, matching Android model naming. Slots 1-14 represent buttons (slot 14 is hot water); slot 15 holds the totals. All 15 pairs are preserved for a 30-value response. Only the Android-compatible 28-value format inserts zero at slot 13 and flags it as omitted. MachineId is 0 if backend machine provisioning is not yet available. UniqueCode remains required for MQTT connection.
 
 Only validated snapshots are published, once per successful local publish. Failed publish attempts are throttled to one second and retried while that snapshot remains valid; newer readings replace it and invalid readings invalidate it. Counters are not queued or stored to flash.
 

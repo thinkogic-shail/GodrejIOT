@@ -5,7 +5,7 @@
 #include <time.h>
 
 namespace VendingSerial {
-// Defaults to dedicated UART1 RX13/TX14; saved legacy RX3/TX1 uses UART0.
+// Fixed dedicated UART1 RX13/TX14; no saved or BLE pin overrides.
 bool begin();
 bool isReady();
 int activeRxPin();
@@ -23,5 +23,7 @@ uint32_t readingSequence();
 bool takeResult(String& status, String& raw);
 // Independent snapshot: does not consume the BLE result. Includes failed reads.
 bool latestResult(String& status, String& raw, uint32_t& attempt,
-                  uint32_t& finishedAt, time_t& finishedEpoch);
+                  uint32_t& finishedAt, time_t& finishedEpoch,
+                  uint32_t* echoCount = nullptr, String* echoRaw = nullptr,
+                  bool* machineStatus = nullptr, String* rinseAction = nullptr);
 }

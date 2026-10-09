@@ -1,5 +1,4 @@
 #include "storage.h"
-#include "vending_uart_config.h"
 #include "config.h"
 #include <Preferences.h>
 
@@ -206,22 +205,6 @@ bool loadMqttSettings(String& outHost, uint16_t& outPort, String& outUser, Strin
   outUser = prefs.getString("mqtt_user", "");
   outPass = prefs.getString("mqtt_pass", "");
   return outHost.length() > 0 && outPort > 0;
-}
-
-bool saveVendingUart(int rx, int tx) {
-  if (!VendingUartConfig::valid(rx, tx)) return false;
-  // One NVS value commits the pair together.
-  return prefs.putUInt("vend_uart", (static_cast<uint32_t>(rx) << 8) | tx) == sizeof(uint32_t);
-}
-
-bool loadVendingUart(int& rx, int& tx) {
-  if (!prefs.isKey("vend_uart")) return false;
-  uint32_t packed = prefs.getUInt("vend_uart", UINT32_MAX);
-  int savedRx = (packed >> 8) & 255, savedTx = packed & 255;
-  if (packed > 65535 || !VendingUartConfig::valid(savedRx, savedTx)) return false;
-  rx = savedRx;
-  tx = savedTx;
-  return true;
 }
 
 bool saveSimSettings(const String& apn, const String& user, const String& pass, const String& pin) {
