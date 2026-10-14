@@ -8,6 +8,10 @@
 #include "time_sync.h"
 #include <atomic>
 #include <ArduinoJson.h>
+#include "ble_text_framing.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <new>
 
 #include <NimBLEDevice.h>
 #include "esp_system.h"
@@ -17,10 +21,67 @@ static NimBLECharacteristic* g_tx = nullptr;
 static NimBLECharacteristic* g_counterResult = nullptr;
 static NimBLECharacteristic* g_counterRaw = nullptr;
 static NimBLEServer* g_server = nullptr;
-static bool g_connected = false;
+static std::atomic<bool> g_connected{false};
+static std::atomic<bool> g_bleEnabled{false};
+static std::atomic<bool> g_notificationsEnabled{false};
+static std::atomic<bool> g_commandSeen{false};
+static std::atomic<uint32_t> g_connectedAt{0};
+static uint32_t g_lastRecoveryAt = 0;
+static constexpr uint32_t BLE_SETUP_TIMEOUT_MS = 30000;
+static constexpr uint32_t BLE_RECOVERY_INTERVAL_MS = 2000;
+static constexpr bool bleTimeoutExpired(uint32_t now, uint32_t since, uint32_t timeout) {
+  return static_cast<int32_t>(now - since) >= static_cast<int32_t>(timeout);
+}
+static_assert(!bleTimeoutExpired(29999, 0, BLE_SETUP_TIMEOUT_MS), "Setup before boundary");
+static_assert(bleTimeoutExpired(30000, 0, BLE_SETUP_TIMEOUT_MS), "Setup boundary");
+static_assert(!bleTimeoutExpired(100, 101, BLE_SETUP_TIMEOUT_MS), "Concurrent newer timestamp");
+static_assert(bleTimeoutExpired(29999, UINT32_MAX, BLE_SETUP_TIMEOUT_MS), "Millis rollover");
 static std::atomic<bool> g_maintenanceMode{false};
 static constexpr uint16_t INVALID_CONN_HANDLE = 0xFFFF;
-static uint16_t g_connHandle = INVALID_CONN_HANDLE;
+static std::atomic<uint16_t> g_connHandle{INVALID_CONN_HANDLE};
+static std::atomic<uint32_t> g_sessionGeneration{0};
+struct PendingNotification {
+  String text;
+  uint16_t handle;
+  uint32_t generation;
+};
+static QueueHandle_t g_notificationQueue = nullptr;
+
+static void notificationTask(void*) {
+  for (;;) {
+    PendingNotification* message = nullptr;
+    if (xQueueReceive(g_notificationQueue, &message, portMAX_DELAY) != pdTRUE) continue;
+    NimBLECharacteristic* const tx = g_tx;
+    const auto currentSession = [message, tx]() {
+      return g_bleEnabled.load() && g_connected.load() &&
+          g_notificationsEnabled.load() && tx && g_server &&
+          g_connHandle.load() == message->handle &&
+          g_sessionGeneration.load() == message->generation;
+    };
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(message->text.c_str());
+    size_t offset = 0;
+    while (offset < message->text.length() && currentSession()) {
+      const size_t capacity = BleTextFraming::payloadSize(g_server->getPeerMTU(message->handle));
+      const size_t length = BleTextFraming::chunkSize(message->text.c_str(), message->text.length(), offset, capacity);
+      if (!length) break;
+      bool sent = false;
+      // Serialized frames and bounded retries prevent interleaving and queue floods.
+      for (int retry = 0; retry < 3 && currentSession(); ++retry) {
+        if (tx->notify(bytes + offset, length, message->handle)) { sent = true; break; }
+        vTaskDelay(pdMS_TO_TICKS(20));
+      }
+      if (!sent) {
+        // A failed fragment leaves an incomplete JSON frame. End the link so
+        // Android clears its assembler instead of combining later responses.
+        if (currentSession()) g_server->disconnect(message->handle);
+        break;
+      }
+      offset += length;
+      vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    delete message;
+  }
+}
 
 static String loadNetworkModeOrDefault() {
   String mode;
@@ -192,9 +253,11 @@ static void releaseBleStack() {
   // Keep pre-restart teardown lightweight. Full NimBLE deinit from a BLE
   // callback can block before ESP.restart() gets a chance to run.
   Serial.println("BLE advertising stop: release before restart");
+  g_bleEnabled = false;
   NimBLEDevice::stopAdvertising();
 
-  g_tx = nullptr;
+  // Objects remain alive until ESP.restart(); the notification worker observes
+  // g_bleEnabled=false and stops without racing a characteristic teardown.
   g_connected = false;
   g_connHandle = INVALID_CONN_HANDLE;
 }
@@ -429,6 +492,15 @@ static void handleDisconnect() {
 
 class ServerCB : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
+    // One technician owns the command/response session at a time.
+    if (g_connected.load()) {
+      server->disconnect(connInfo.getConnHandle());
+      return;
+    }
+    g_connectedAt = millis();
+    ++g_sessionGeneration;
+    g_notificationsEnabled = false;
+    g_commandSeen = false;
     g_connected = true;
     g_server = server;
     g_connHandle = connInfo.getConnHandle();
@@ -437,22 +509,37 @@ class ServerCB : public NimBLEServerCallbacks {
   }
 
   void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) override {
-    (void)connInfo;
     (void)reason;
+    if (g_connHandle.load() != connInfo.getConnHandle()) return;
+    ++g_sessionGeneration;
+    g_notificationsEnabled = false;
+    g_commandSeen = false;
     g_connected = false;
     g_connHandle = INVALID_CONN_HANDLE;
-    Serial.println("BLE disconnected");
+    g_maintenanceMode = false;
+    Serial.println("BLE disconnected; maintenance ended");
     Serial.println("BLE advertising start: client disconnected");
-    server->startAdvertising();
+    if (g_bleEnabled.load()) server->startAdvertising();
+  }
+};
+
+class TxCB : public NimBLECharacteristicCallbacks {
+  void onSubscribe(NimBLECharacteristic*, NimBLEConnInfo& info, uint16_t value) override {
+    if (info.getConnHandle() != g_connHandle.load()) return;
+    g_notificationsEnabled = (value & 1) != 0;
   }
 };
 
 class RxCB : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& connInfo) override {
-    g_connHandle = connInfo.getConnHandle();
+    if (connInfo.getConnHandle() != g_connHandle.load()) return;
     std::string value = c->getValue();
     String cmd = String(value.c_str());
     cmd.trim();
+    // Do not mutate settings or enter maintenance before acknowledgements can
+    // be received. Android must finish enabling TX notifications first.
+    if (cmd.isEmpty() || !g_notificationsEnabled.load()) return;
+    g_commandSeen = true;
 
     if (cmd.equalsIgnoreCase("READ_COUNTER_ONCE")) {
       bool queued = VendingSerial::requestCounterRead();
@@ -467,14 +554,6 @@ class RxCB : public NimBLECharacteristicCallbacks {
 
     if (cmd.equalsIgnoreCase("GET")) {
       BLEManager::notifyText(buildStatusJson());
-      return;
-    }
-
-    if (cmd.equalsIgnoreCase("GET_SETTINGS")) {
-      String settingsJson = buildSettingsJson();
-      Serial.print("BLE TX: ");
-      Serial.println(settingsJson);
-      BLEManager::notifyText(settingsJson);
       return;
     }
 
@@ -494,7 +573,7 @@ class RxCB : public NimBLECharacteristicCallbacks {
       return;
     }
 
-    if (cmd.equalsIgnoreCase("DISCONNECT") || cmd.equalsIgnoreCase("BYE")) {
+    if (cmd.equalsIgnoreCase("DISCONNECT")) {
       handleDisconnect();
       return;
     }
@@ -579,6 +658,15 @@ void begin(const String& deviceName) {
     NIMBLE_PROPERTY::NOTIFY
   );
 
+  g_tx->setCallbacks(new TxCB());
+  g_notificationQueue = xQueueCreate(8, sizeof(PendingNotification*));
+  if (!g_notificationQueue ||
+      xTaskCreate(notificationTask, "ble_notify", 4096, nullptr, 1, nullptr) != pdPASS) {
+    if (g_notificationQueue) vQueueDelete(g_notificationQueue);
+    g_notificationQueue = nullptr;
+    return;
+  }
+
   // READ supports a long GATT read, avoiding notification MTU truncation.
   g_counterResult = svc->createCharacteristic(
     "6E400004-B5A3-F393-E0A9-E50E24DCCA9E", NIMBLE_PROPERTY::READ
@@ -602,11 +690,36 @@ void begin(const String& deviceName) {
   adv->setScanResponseData(scanResp);
 
   Serial.println("BLE init: starting advertising");
+  g_bleEnabled = true;
   adv->start();
   Serial.println("BLE advertising started (adv + scan response)");
 }
 
 void loop() {
+  if (g_bleEnabled.load() && g_server) {
+    const uint32_t now = millis();
+    if (now - g_lastRecoveryAt >= BLE_RECOVERY_INTERVAL_MS) {
+      g_lastRecoveryAt = now;
+      if (g_server->getConnectedCount() == 0) {
+        // Reconcile a missed disconnect callback and retry failed advertising.
+        g_connected = false;
+        g_connHandle = INVALID_CONN_HANDLE;
+        g_notificationsEnabled = false;
+        g_commandSeen = false;
+        g_maintenanceMode = false;
+        if (!NimBLEDevice::getAdvertising()->isAdvertising())
+          startAdvertisingWithLog("disconnected recovery");
+      } else if (g_connected.load()) {
+        const bool ready = g_commandSeen.load();
+        const bool setupExpired = !ready && bleTimeoutExpired(now, g_connectedAt.load(), BLE_SETUP_TIMEOUT_MS);
+        if (setupExpired) {
+          // Retry if disconnect fails; advertise after the link actually closes.
+          const uint16_t handle = g_connHandle.load();
+          if (handle != INVALID_CONN_HANDLE) g_server->disconnect(handle);
+        }
+      }
+    }
+  }
   String status;
   String raw;
   if (VendingSerial::takeResult(status, raw) && g_counterResult) {
@@ -650,9 +763,15 @@ bool isMaintenanceMode() {
 }
 
 void notifyText(const String& msg) {
-  if (!g_tx) return;
-  g_tx->setValue(msg.c_str());
-  g_tx->notify();
+  if (!g_tx || !g_notificationQueue || !g_bleEnabled.load() ||
+      !g_connected.load() || !g_notificationsEnabled.load()) return;
+  auto* message = new (std::nothrow) PendingNotification{
+      msg, g_connHandle.load(), g_sessionGeneration.load()};
+  if (!message || xQueueSend(g_notificationQueue, &message, 0) != pdTRUE) {
+    delete message;
+    // Force a clean retry if a full response cannot be queued.
+    if (g_server && g_connected.load()) g_server->disconnect(g_connHandle.load());
+  }
 }
 
 void release() {

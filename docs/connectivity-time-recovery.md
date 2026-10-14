@@ -26,7 +26,7 @@ REBOOT
 
 All four SET_SIM fields can be blank: SET_SIM:|||. This resets saved firmware overrides to blank (and disables PAP); an existing modem PDP APN is preserved. Changing settings requires maintenance and reboot. UPDATE_ALL retains its original fields; SIM settings are configured separately. To return to Wi-Fi, use SET_MODE:WIFI in maintenance then REBOOT.
 
-GET reports cellularStatus and timeSynced. GET_SETTINGS / READ_ALL include simApn and boolean credential/PIN-configured flags, without returning new SIM passwords or PINs. AT delimiter/control characters are rejected. Existing BLE authentication limitations remain unchanged.
+GET reports cellularStatus and timeSynced. READ_ALL include simApn and boolean credential/PIN-configured flags, without returning new SIM passwords or PINs. AT delimiter/control characters are rejected. Existing BLE authentication limitations remain unchanged.
 
 The board needs an active SIM, antenna and adequate external power for the modem. Manufacturer specifies 9V 2A input for cellular use; USB-only operation is not established by this build.
 

@@ -354,7 +354,7 @@ void loop() {
 
   if (BLEManager::isMaintenanceMode()) {
     if (!maintenancePauseApplied) {
-      Serial.println("Maintenance mode active. Pausing WiFi/MQTT until reboot.");
+      Serial.println("Maintenance mode active. Pausing WiFi/MQTT until BLE disconnect.");
       MqttManager::disconnect();
       if (isWifiMode()) WiFiManager::disconnect();
       else CellularManager::disconnect();
@@ -371,6 +371,7 @@ void loop() {
     return;
   }
 
+  if (maintenancePauseApplied && !isWifiMode()) CellularManager::resume();
   maintenancePauseApplied = false;
 
   if (isWifiMode()) WiFiManager::ensureConnected();

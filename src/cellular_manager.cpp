@@ -98,6 +98,12 @@ void CellularManager::disconnect() {
   currentStatus = "maintenance";
 }
 
+void CellularManager::resume() {
+  started = true;
+  attempted = false;
+  currentStatus = "starting";
+}
+
 void CellularManager::ensureConnected() {
   if (!started) return;
   uint32_t now = millis();

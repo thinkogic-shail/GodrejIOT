@@ -8,5 +8,7 @@ void ensureConnected();
 bool isConnected();
 Client& client();
 void disconnect();
+// Resume the current runtime configuration after maintenance; no NVS reload.
+void resume();
 const char* status();
 }

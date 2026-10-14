@@ -134,7 +134,7 @@ Test after flashing:
 Statuses: idle, complete, timeout, overflow, write_failed, uart_not_ready.
 Complete means a nonempty terminated frame was captured, not that its checksum or counters are valid. Timeout retains partial bytes for diagnosis. Overflow retains the first 512 bytes and reports failure. Results persist until the next completed read and are available after a BLE reconnect.
 
-UART operations run in the main loop; the BLE callback only queues a request atomically. Reception processes at most 128 bytes per iteration. Existing MQTT connect operations can still block the overall loop for their configured timeout; use the existing MAINTENANCE_ON command for an isolated serial test if necessary (networking then stays paused until reboot). No new blocking receive wait or retries are introduced.
+UART operations run in the main loop; the BLE callback only queues a request atomically. Reception processes at most 128 bytes per iteration. Existing MQTT connect operations can still block the overall loop for their configured timeout; use the existing MAINTENANCE_ON command for an isolated serial test if necessary (networking stays paused until BLE disconnect or reboot). No new blocking receive wait or retries are introduced.
 
 ## Step 4: counter validation and parsing
 
