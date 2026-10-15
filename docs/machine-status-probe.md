@@ -9,7 +9,8 @@ at 9600 8N1 without flow control.
 
 Build/upload `machine_status_probe` to temporarily replace counter polling
 with a status request every 10 seconds. Existing Wi-Fi/MQTT settings and the
-counterdiagnostic topic are retained. Messages identify Command=MACHINE_STATUS,
+diagnostics topic (`godrej/diagnostics/<UniqueCode>`) are used. Enable publishing
+with BLE `DIAGNOSTICS_ON`; it defaults to disabled. Messages identify Command=MACHINE_STATUS,
 RequestType=MachineStatusDiagnostic, transport Status, ReceivedBytes, raw
 response and checksum validation. Valid replies also expose ErrorLevel,
 ErrorNumber and MachineMessage mapped from the reference Android implementation.

@@ -19,6 +19,8 @@ void loop();
 bool latestReading(CounterProtocol::Reading& output, uint32_t& capturedAt,
                    uint32_t* sequence = nullptr, time_t* capturedEpoch = nullptr);
 uint32_t readingSequence();
+// Separate status snapshot so counter captures cannot overwrite machine state.
+bool latestMachineStatus(uint32_t& level, uint32_t& number);
 // Raw capture only: complete means terminated, not protocol-validated.
 bool takeResult(String& status, String& raw);
 // Independent snapshot: does not consume the BLE result. Includes failed reads.

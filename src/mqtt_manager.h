@@ -9,7 +9,7 @@ namespace MqttManager {
   void disconnect();
 
   // Subscribe / publish helpers
-  void subscribeTopics(const String& getInfoTopic, bool wildcard = false, uint8_t qos = 1);
+  bool subscribeTopics(const String& getInfoTopic, bool wildcard = false, uint8_t qos = 1);
   bool publishJson(const String& topic, const String& payload);
 
   // Must be called in loop

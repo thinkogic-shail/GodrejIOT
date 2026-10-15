@@ -15,6 +15,8 @@
 #include "machine_status_messages.h"
 #include "cellular_manager.h"
 #include "time_sync.h"
+#include "telemetry_settings.h"
+#include "configuration_manager.h"
 #include <esp_task_wdt.h>
 
 WiFiClient wifiClient;
@@ -31,26 +33,32 @@ static String g_mqttPass = MQTT_PASS;
 static uint32_t g_lastPublishedCounterSequence = 0;
 static uint32_t g_lastCounterPublishAttempt = 0;
 static bool g_counterPublishAttempted = false;
+static uint32_t g_lastCounterPublishedAt = 0;
+static bool g_counterPublished = false;
 static bool g_watchdogActive = false;
-static uint32_t g_lastPublishedDiagnosticAttempt = 0;
 static uint32_t g_lastDiagnosticPublishAt = 0;
 static bool g_diagnosticPublishAttempted = false;
+static uint32_t g_lastStatusPublishAt = 0;
 
 static void feedRecoveryWatchdog() {
   if (g_watchdogActive) esp_task_wdt_reset();
 }
 
 static void publishCounterDiagnostic(const String& uniqueCode) {
+  if (!TelemetrySettings::diagnosticsEnabled.load()) {
+    g_diagnosticPublishAttempted = false;
+    return;
+  }
   const uint32_t now = millis();
-  if (g_diagnosticPublishAttempted && now - g_lastDiagnosticPublishAt < 1000) return;
+  if (g_diagnosticPublishAttempted &&
+      now - g_lastDiagnosticPublishAt < TelemetrySettings::diagnosticIntervalMs.load()) return;
   String status, raw, echoRaw, rinseAction;
   bool machineStatus = false;
   uint32_t echoCount = 0;
   uint32_t attempt, finishedAt;
   time_t epoch;
   if (!VendingSerial::latestResult(status, raw, attempt, finishedAt, epoch,
-                                  &echoCount, &echoRaw, &machineStatus, &rinseAction) ||
-      attempt == g_lastPublishedDiagnosticAttempt) return;
+                                  &echoCount, &echoRaw, &machineStatus, &rinseAction)) return;
   g_diagnosticPublishAttempted = true;
   g_lastDiagnosticPublishAt = now;
   CounterProtocol::Reading reading;
@@ -94,10 +102,33 @@ static void publishCounterDiagnostic(const String& uniqueCode) {
   doc["RawResponse"] = captured;
   String payload;
   serializeJson(doc, payload);
-  if (MqttManager::publishJson("godrej/counterdiagnostic/" + uniqueCode, payload)) {
-    g_lastPublishedDiagnosticAttempt = attempt;
-    g_diagnosticPublishAttempted = false;
-  }
+  MqttManager::publishJson("godrej/diagnostics/" + uniqueCode, payload);
+}
+
+static void publishMachineStatus(const String& uniqueCode) {
+  const uint32_t now = millis();
+  if (now - g_lastStatusPublishAt < TelemetrySettings::statusIntervalMs.load()) return;
+  // Also bound retries and missing/invalid response checks to the interval.
+  g_lastStatusPublishAt = now;
+  uint32_t level, number;
+  if (!VendingSerial::latestMachineStatus(level, number)) return;
+  MachineInfo info;
+  const bool hasInfo = Storage::loadMachineInfo(info);
+  JsonDocument doc;
+  doc["MachineId"] = hasInfo ? info.MachineId : 0;
+  doc["UniqueCode"] = uniqueCode;
+  doc["ErrorLevel"] = String(level);
+  doc["ErrorNo"] = String(number);
+  doc["ErrorName"] = machineStatusMessage(level, number);
+  const String dateTime = TimeSync::format(TimeSync::now(), "%Y-%m-%d %I:%M %p");
+  if (dateTime.length()) doc["StatusDateTime"] = dateTime;
+  else doc["StatusDateTime"] = nullptr;
+  doc["RequestType"] = "Status";
+  for (const char* field : {"ButtonNo", "EmployeeCode", "EmployeeName", "CardNo", "FacilityCode", "IssueType"})
+    doc[field] = "";
+  String payload;
+  serializeJson(doc, payload);
+  MqttManager::publishJson("godrej/sendstatus/" + uniqueCode, payload);
 }
 
 static void publishLatestCounters(const String& uniqueCode) {
@@ -108,6 +139,8 @@ static void publishLatestCounters(const String& uniqueCode) {
   if (!VendingSerial::latestReading(reading, capturedAt, &sequence, &capturedEpoch) ||
       sequence == g_lastPublishedCounterSequence) return;
   const uint32_t now = millis();
+  if (g_counterPublished &&
+      now - g_lastCounterPublishedAt < TelemetrySettings::counterIntervalMs.load()) return;
   if (g_counterPublishAttempted && now - g_lastCounterPublishAttempt < 1000) return;
   g_lastCounterPublishAttempt = now;
   g_counterPublishAttempted = true;
@@ -136,6 +169,8 @@ static void publishLatestCounters(const String& uniqueCode) {
   serializeJson(doc, payload);
   if (MqttManager::publishJson("godrej/sendcounter/" + uniqueCode, payload)) {
     g_lastPublishedCounterSequence = sequence;
+    g_lastCounterPublishedAt = millis();
+    g_counterPublished = true;
     g_counterPublishAttempted = false;
   }
 }
@@ -184,7 +219,7 @@ static String buildInfoRequestJson() {
   String payload = "{";
   payload += "\"MachineId\":0,";
   payload += "\"UniqueCode\":\"" + uniqueCode + "\",";
-  payload += "\"RequestType\":\"Info\"";
+  payload += "\"RequestType\":\"Info-IOT\"";
   payload += "}";
   return payload;
 }
@@ -243,6 +278,7 @@ void setup() {
   if (!Storage::begin()) {
     Serial.println("Storage initialization failed");
   }
+  ConfigurationManager::begin();
   VendingSerial::begin();
 
   // TEMP: Uncomment for one boot when you want to clear NVS and continue startup.
@@ -398,7 +434,12 @@ void loop() {
     if (MqttManager::isConnected()) {
       String uniqueCode = getCurrentUniqueCode();
       if (!topicsSubscribed) {
-        MqttManager::subscribeTopics(topicGetInfo(uniqueCode), false, 1);
+        if (!MqttManager::subscribeTopics(topicGetInfo(uniqueCode), false, 1)) {
+          ButtonManager::loop();
+          BLEManager::loop();
+          delay(10);
+          return;
+        }
         topicsSubscribed = true;
         infoRequestSent = false;
         bootHeartbeatSent = false;
@@ -409,11 +450,14 @@ void loop() {
         VendingSerial::requestCounterRead();
       }
 
+      ConfigurationManager::requestIfNeeded(uniqueCode);
       MqttManager::loop();
       feedRecoveryWatchdog();
       publishLatestCounters(uniqueCode);
       feedRecoveryWatchdog();
       publishCounterDiagnostic(uniqueCode);
+      feedRecoveryWatchdog();
+      publishMachineStatus(uniqueCode);
       feedRecoveryWatchdog();
 
       if (!bootHeartbeatSent) {

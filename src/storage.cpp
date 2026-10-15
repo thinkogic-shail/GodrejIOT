@@ -1,5 +1,6 @@
 #include "storage.h"
 #include "config.h"
+#include "configuration_manager.h"
 #include <Preferences.h>
 
 static Preferences prefs;
@@ -87,6 +88,19 @@ bool saveMachineInfo(const MachineInfo& info) {
   return ok;
 }
 
+bool clearMachineInfo() {
+  // Invalidate first so interrupted cleanup cannot reuse partially cleared data.
+  if (prefs.putBool("valid", false) != 1) return false;
+  static const char* const keys[] = {
+      "mid", "cid", "lid", "ssid", "msi", "mri", "ecode", "emsg", "rtype",
+      "mname", "cname", "lname", "model", "serial", "asset", "sw", "inst", "video"};
+  bool ok = true;
+  for (const char* key : keys) {
+    if (prefs.isKey(key) && !prefs.remove(key)) ok = false;
+  }
+  return ok;
+}
+
 bool loadMachineInfo(MachineInfo& outInfo) {
   bool valid = prefs.getBool("valid", false);
   int mid = prefs.getInt("mid", 0);
@@ -119,8 +133,20 @@ bool loadMachineInfo(MachineInfo& outInfo) {
 
 bool clearAll() {
   bool cleared = prefs.clear();
+  if (cleared) ConfigurationManager::reset();
   bool versionWritten = prefs.putUShort(KEY_SCHEMA, STORAGE_SCHEMA_VERSION) == sizeof(uint16_t);
   return cleared && versionWritten;
+}
+
+bool saveConfiguration(const String& json) {
+  // Avoid rewriting flash when the server returns the same configuration.
+  if (prefs.getString("configuration", "") == json) return true;
+  return writeString("configuration", json);
+}
+
+bool loadConfiguration(String& json) {
+  json = prefs.getString("configuration", "");
+  return !json.isEmpty();
 }
 
 bool isProvisioned() {

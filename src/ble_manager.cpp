@@ -6,6 +6,7 @@
 #include "counter_protocol.h"
 #include "cellular_manager.h"
 #include "time_sync.h"
+#include "telemetry_settings.h"
 #include <atomic>
 #include <ArduinoJson.h>
 #include "ble_text_framing.h"
@@ -46,6 +47,8 @@ struct PendingNotification {
   uint32_t generation;
 };
 static QueueHandle_t g_notificationQueue = nullptr;
+static std::atomic<bool> g_reconnectRestartPending{false};
+static std::atomic<uint32_t> g_reconnectRequestedAt{0};
 
 static void notificationTask(void*) {
   for (;;) {
@@ -539,7 +542,21 @@ class RxCB : public NimBLECharacteristicCallbacks {
     // Do not mutate settings or enter maintenance before acknowledgements can
     // be received. Android must finish enabling TX notifications first.
     if (cmd.isEmpty() || !g_notificationsEnabled.load()) return;
+    if (g_reconnectRestartPending.load()) return;
     g_commandSeen = true;
+
+    if (cmd.equalsIgnoreCase("DIAGNOSTICS_ON") || cmd.equalsIgnoreCase("DIAGNOSTICS_OFF")) {
+      const bool enabled = cmd.equalsIgnoreCase("DIAGNOSTICS_ON");
+      TelemetrySettings::diagnosticsEnabled.store(enabled);
+      JsonDocument reply;
+      reply["ok"] = true;
+      reply["msg"] = enabled ? "Diagnostics enabled" : "Diagnostics disabled";
+      reply["intervalMs"] = TelemetrySettings::diagnosticIntervalMs.load();
+      String payload;
+      serializeJson(reply, payload);
+      BLEManager::notifyText(payload);
+      return;
+    }
 
     if (cmd.equalsIgnoreCase("READ_COUNTER_ONCE")) {
       bool queued = VendingSerial::requestCounterRead();
@@ -585,6 +602,25 @@ class RxCB : public NimBLECharacteristicCallbacks {
 
     if (cmd.startsWith("UPDATE_ALL:")) {
       handleUpdateAll(cmd);
+      return;
+    }
+
+    if (cmd.equalsIgnoreCase("RECONNECT_IOT")) {
+      if (!ensureMaintenanceMode("RECONNECT_IOT")) return;
+      if (loadUniqueCodeOrDefault().isEmpty()) {
+        BLEManager::notifyText("{\"ok\":false,\"msg\":\"UniqueCode required for IoT reconnect\"}");
+        return;
+      }
+      if (!Storage::clearMachineInfo()) {
+        BLEManager::notifyText("{\"ok\":false,\"msg\":\"Machine information clear failed\"}");
+        return;
+      }
+      MachineInfoStore::clear();
+      BLEManager::notifyText("{\"ok\":true,\"msg\":\"IoT reconnect scheduled. Rebooting\"}");
+      // Return from the GATT write callback before restarting. Allow the queued
+      // acknowledgement to be transmitted while maintenance keeps MQTT paused.
+      g_reconnectRequestedAt = millis();
+      g_reconnectRestartPending = true;
       return;
     }
 
@@ -696,6 +732,12 @@ void begin(const String& deviceName) {
 }
 
 void loop() {
+  if (g_reconnectRestartPending.load() &&
+      bleTimeoutExpired(millis(), g_reconnectRequestedAt.load(), 500)) {
+    release();
+    ESP.restart();
+    return;
+  }
   if (g_bleEnabled.load() && g_server) {
     const uint32_t now = millis();
     if (now - g_lastRecoveryAt >= BLE_RECOVERY_INTERVAL_MS) {

@@ -85,3 +85,35 @@ Typical command-ack timeout: 5 seconds. Counter completion timeout: about 10 sec
 A write callback alone is not the firmware acknowledgement. On a lost maintenance
 ack, close/disconnect to let firmware clear the mode before retrying. There is no
 need to add SET_NETWORK, GET_SETTINGS, BYE or UART configuration commands.
+
+## MQTT diagnostics control
+
+Send `DIAGNOSTICS_ON` or `DIAGNOSTICS_OFF` after subscribing to TX notifications.
+These commands do not require maintenance mode and change runtime state immediately.
+Acknowledgement includes `ok`, `msg`, and `intervalMs` (default 1000).
+Diagnostics default to disabled after reboot. Disconnect BLE to resume MQTT if
+maintenance mode was enabled; diagnostics remain enabled across BLE disconnect.
+Subscribe to `godrej/diagnostics/<UniqueCode>` to receive the latest UART capture
+each interval. Publishing does not change UART polling frequency.
+
+## Reconnect to IoT
+
+Android label: Reconnect to IoT. BLE command: RECONNECT_IOT (no parameters).
+Requires maintenance mode and a saved nonempty UniqueCode. Invalidates/removes
+only cached machine provisioning fields and clears their RAM snapshot. UniqueCode,
+Wi-Fi, SIM, MQTT, network mode and schema are preserved. Cleanup failure returns
+ok=false without scheduling a reboot; provisioning may already be invalidated.
+Success response:
+```
+{"ok":true,"msg":"IoT reconnect scheduled. Rebooting"}
+```
+Restart is deferred to the main loop by 500 ms so the write callback returns and
+the notification worker can send the acknowledgement. Android should show
+Reconnecting, clear its BLE session on the expected disconnect, and avoid treating
+that disconnect as an error. After reboot and MQTT connection, the normal startup
+path subscribes to godrej/getinfo/<UniqueCode> and sends
+{"MachineId":0,"UniqueCode":"TK100","RequestType":"Info-IOT"}
+on godrej/sendinfo/<UniqueCode>. It saves a valid server response as usual.
+The BLE success means cleanup/restart was scheduled, not that server registration
+already completed. Existing server-response retry behavior is unchanged. A normal
+REBOOT preserves cached machine information and does not force this refresh.

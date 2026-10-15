@@ -10,6 +10,11 @@ namespace Storage {
 
   bool saveMachineInfo(const MachineInfo& info);
   bool loadMachineInfo(MachineInfo& outInfo);
+  // Removes only provisioning data, preserving identity and connection settings.
+  bool clearMachineInfo();
+
+  bool saveConfiguration(const String& json);
+  bool loadConfiguration(String& json);
 
   bool clearAll();
 

@@ -37,6 +37,9 @@ static uint32_t g_lastStartedAt = 0;
 static bool g_hasStarted = false;
 static CounterProtocol::Reading g_latest;
 static bool g_latestValid = false;
+static bool g_machineStatusValid = false;
+static uint32_t g_machineLevel = 0;
+static uint32_t g_machineNumber = 0;
 static uint32_t g_capturedAt = 0;
 static uint32_t g_readingSequence = 0;
 static uint32_t g_attemptSequence = 0;
@@ -75,6 +78,9 @@ static void finish(const char* status) {
     const bool valid = g_status == "complete" &&
         CounterProtocol::parseMachineStatus(g_raw.c_str(), g_raw.length(),
                                            level, number) == nullptr;
+    g_machineStatusValid = valid;
+    g_machineLevel = level;
+    g_machineNumber = number;
     const auto action = AutoRinsePolicy::decide(valid, level, number,
         g_pollingEnabled.load(), g_rinseLatched, g_hasRinsed,
         millis() - g_lastRinseAt);
@@ -335,5 +341,14 @@ uint32_t readingSequence() {
   if (!g_mutex) return 0;
   StateLock lock;
   return g_readingSequence;
+}
+
+bool latestMachineStatus(uint32_t& level, uint32_t& number) {
+  if (!g_mutex) return false;
+  StateLock lock;
+  if (!g_machineStatusValid) return false;
+  level = g_machineLevel;
+  number = g_machineNumber;
+  return true;
 }
 }

@@ -2,6 +2,7 @@
 #include "config.h"
 #include "machine_info.h"
 #include "storage.h"
+#include "configuration_manager.h"
 
 static PubSubClient* g_client = nullptr;
 static const char* g_host = nullptr;
@@ -11,6 +12,7 @@ static String g_user;
 static String g_pass;
 
 static String g_getInfoTopic;
+static String g_configurationAckTopic;
 static bool g_wildcard = false;
 static uint32_t g_lastConnectAttemptAt = 0;
 static int g_lastConnectState = INT32_MIN;
@@ -30,7 +32,13 @@ static void onMessage(char* topic, byte* payload, unsigned int len) {
   Serial.print("Payload length: ");
   Serial.println(len);
 
-  if (topicStr == g_getInfoTopic) {
+  if (topicStr == g_configurationAckTopic) {
+    if (Storage::isProvisioned() && ConfigurationManager::accept(msg)) {
+      Serial.println("Configuration saved to NVS and applied");
+    } else {
+      Serial.println("Configuration rejected or save failed; previous settings retained");
+    }
+  } else if (topicStr == g_getInfoTopic) {
     Serial.println("Matched getinfo for this device");
     if (MachineInfoStore::parseAndStore(msg)) {
       Serial.println("Machine info stored in memory");
@@ -62,6 +70,7 @@ void begin(PubSubClient& client, const char* host, uint16_t port, const String& 
   g_host = host;
   g_port = port;
   g_uniqueCode = uniqueCode;
+  g_configurationAckTopic = "godrej/configuration-ack/" + uniqueCode;
   g_user = user ? user : "";
   g_pass = pass ? pass : "";
 
@@ -121,6 +130,7 @@ void ensureConnected() {
     g_client->subscribe(g_getInfoTopic.c_str(), 1);
     Serial.print("Subscribed: "); Serial.println(g_getInfoTopic);
   }
+  g_client->subscribe(g_configurationAckTopic.c_str(), 1);
 }
 
 void disconnect() {
@@ -135,19 +145,21 @@ void disconnect() {
   g_lastConnectState = INT32_MIN;
 }
 
-void subscribeTopics(const String& getInfoTopic, bool wildcard, uint8_t qos) {
-  (void)qos;
+bool subscribeTopics(const String& getInfoTopic, bool wildcard, uint8_t qos) {
   g_getInfoTopic = getInfoTopic;
   g_wildcard = wildcard;
 
-  if (!g_client || !g_client->connected()) return;
+  if (!g_client || !g_client->connected()) return false;
 
+  bool ok = true;
   if (g_wildcard) {
-    g_client->subscribe("godrej/#", 1);
+    ok &= g_client->subscribe("godrej/#", qos);
     Serial.println("Subscribed: godrej/# (QoS1)");
   }
-  g_client->subscribe(g_getInfoTopic.c_str(), 1);
+  ok &= g_client->subscribe(g_getInfoTopic.c_str(), qos);
+  ok &= g_client->subscribe(g_configurationAckTopic.c_str(), qos);
   Serial.print("Subscribed: "); Serial.println(g_getInfoTopic);
+  return ok;
 }
 
 bool publishJson(const String& topic, const String& payload) {

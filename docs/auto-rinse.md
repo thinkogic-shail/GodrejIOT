@@ -20,7 +20,7 @@ status polling and prevents rinsing. The serial worker waits three seconds after
 a rinse attempt before its next read. Android treats dispense/rinse as having no
 required reply; writing the command is not confirmation of execution or completion.
 
-On `godrej/counterdiagnostic/<UniqueCode>`, status diagnostic messages include
+On `godrej/diagnostics/<UniqueCode>` (enabled with BLE `DIAGNOSTICS_ON`), status diagnostic messages include
 `AutoRinseAction`: `none`, `sent`, `write_failed`, `already_attempted`, `cooldown`,
 or `maintenance_paused`. Attempts include `RinseCommand`. Subsequent valid machine
 status is how to observe whether the rinse request cleared. The existing counter
