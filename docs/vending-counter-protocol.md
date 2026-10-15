@@ -144,10 +144,12 @@ After READ_COUNTER_ONCE, BLE status characteristic 0004 now includes valid. On s
 
 No periodic polling or counter MQTT publication is enabled yet. test/counter_protocol_test.cpp contains standalone C++11 regression cases for the supplied sample, omitted-slot mapping, checksum and structure failures, and numeric boundaries. Host execution requires a native C++ compiler; none was found in the checked locations on this workstation.
 
-## Step 5: automatic polling every 10 seconds
+## Step 5: independent automatic counter and status polling
 
-- COUNTER_POLL_INTERVAL_MS in config.h is 10000 and is the only polling interval source for now.
-- First automatic request waits 10 seconds after UART initialization. Subsequent requests are spaced from the actual request start time, including manually requested reads.
+- UART counter polling uses TelemetrySettings::counterIntervalMs (10000 ms before configuration). MQTTPushCounterInterval updates both UART polling and MQTT counter publishing at runtime and survives restart through saved configuration.
+- Machine-status polling independently uses TelemetrySettings::statusIntervalMs, set by MQTTPushInterval (5000 ms before configuration). It is not queued by counter completion.
+- First automatic reads wait their configured interval after UART initialization. Each schedule uses its own actual request start time; a manual counter read updates only the counter schedule.
+- Automatic transactions share the UART and have a 1500 ms quiet gap. If both reads are due, counters take priority and status remains deferred until the counter finishes and the quiet gap passes. Active reads are never interrupted; active reads and the post-rinse pause can delay a due read.
 - One queued/active/result-pending request at a time; no overlapping commands or catch-up bursts.
 - Failed reads are retried on the next scheduled poll (no immediate retry burst).
 - Polling runs independently of Wi-Fi/MQTT connectivity and UniqueCode provisioning.

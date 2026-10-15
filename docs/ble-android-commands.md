@@ -8,6 +8,26 @@ Commands with no arguments:
 GET, READ_ALL, READ_COUNTER_ONCE, MAINTENANCE_ON, REBOOT, DISCONNECT, RESET.
 GET reads runtime status; READ_ALL reads saved settings.
 
+READ_ALL also includes runtime `diagnosticsEnabled` as a JSON boolean (true/false).
+It reflects DIAGNOSTICS_ON/OFF immediately and is false after every reboot.
+GET (the device-status response) includes `diagnosticsEnabled` and these numeric
+fields, all in milliseconds:
+
+| Field | Meaning |
+| --- | --- |
+| MQTTPushInterval | Active status publish interval |
+| MQTTPushCounterInterval | Active counter publish interval |
+| MQTTStatisticsInterval | Stored statistics interval; not used yet |
+| ScreensaverInactiveTimeout | Stored screensaver timeout; not used yet |
+| diagnosticIntervalMs | Diagnostics publish interval, even when disabled |
+| counterPollIntervalMs | Runtime UART counter polling interval; equals MQTTPushCounterInterval |
+| statusPollIntervalMs | Independent UART machine-status polling interval; equals MQTTPushInterval |
+
+When machine provisioning exists, GET also includes `MachineStatusInterval` and
+`MachineReadCounterInterval` from saved machine info. These legacy values do not
+control MQTT publishing. Configuration intervals reflect the current RAM snapshot,
+restored from NVS at boot and updated when a valid configuration acknowledgement arrives.
+
 Configuration syntax (literal pipe separators):
 ```
 SET_UNIQUE_CODE:UNIQUE_CODE

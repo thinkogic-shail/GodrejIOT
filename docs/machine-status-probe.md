@@ -8,7 +8,7 @@ is `*1,E,r,1,0,5B\r`, using XOR plus decimal 90 and uppercase hexadecimal,
 at 9600 8N1 without flow control.
 
 Build/upload `machine_status_probe` to temporarily replace counter polling
-with a status request every 10 seconds. Existing Wi-Fi/MQTT settings and the
+with status requests using MQTTPushInterval (default 5 seconds). Existing Wi-Fi/MQTT settings and the
 diagnostics topic (`godrej/diagnostics/<UniqueCode>`) are used. Enable publishing
 with BLE `DIAGNOSTICS_ON`; it defaults to disabled. Messages identify Command=MACHINE_STATUS,
 RequestType=MachineStatusDiagnostic, transport Status, ReceivedBytes, raw

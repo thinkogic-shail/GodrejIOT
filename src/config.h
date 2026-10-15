@@ -23,7 +23,6 @@ static constexpr int VENDING_RX_PIN = 13;
 static constexpr int VENDING_TX_PIN = 14;
 static constexpr uint32_t VENDING_BAUD_RATE = 9600;
 static constexpr size_t VENDING_RX_BUFFER_SIZE = 1024;
-static constexpr uint32_t COUNTER_POLL_INTERVAL_MS = 10000;
 
 // Bharat Pi legacy 4G/A7672S: modem UART2 (not the vending UART0).
 static constexpr int MODEM_RX_PIN = 16;

@@ -19,7 +19,8 @@ struct Configuration {
 // Called after Storage::begin; restores settings and allows one request this boot.
 void begin();
 void reset();
-const Configuration& get();
+// Thread-safe copy for BLE readers while MQTT applies updates in the main loop.
+Configuration get();
 // Rejects malformed configuration without changing saved or active settings.
 bool accept(const String& json);
 // Main loop, after MQTT subscriptions and machine provisioning; one attempt per boot.

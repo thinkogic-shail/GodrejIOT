@@ -3,9 +3,11 @@
 #include "mqtt_manager.h"
 #include "telemetry_settings.h"
 #include <ArduinoJson.h>
+#include <mutex>
 
 namespace {
 ConfigurationManager::Configuration g_configuration;
+std::mutex g_configurationMutex;
 bool g_requested = false;
 
 bool validTime(const String& value) {
@@ -64,6 +66,7 @@ String encode(const ConfigurationManager::Configuration& value) {
 }
 
 void apply(const ConfigurationManager::Configuration& value) {
+  std::lock_guard<std::mutex> lock(g_configurationMutex);
   g_configuration = value;
   TelemetrySettings::statusIntervalMs.store(value.MQTTPushInterval);
   TelemetrySettings::counterIntervalMs.store(value.MQTTPushCounterInterval);
@@ -83,7 +86,10 @@ void begin() {
   if (Storage::loadConfiguration(json) && decode(json, saved)) apply(saved);
 }
 
-const Configuration& get() { return g_configuration; }
+Configuration get() {
+  std::lock_guard<std::mutex> lock(g_configurationMutex);
+  return g_configuration;
+}
 
 bool accept(const String& json) {
   Configuration next;

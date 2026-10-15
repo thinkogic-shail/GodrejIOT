@@ -1,5 +1,7 @@
 #include "vending_serial.h"
 #include "config.h"
+#include "telemetry_settings.h"
+#include "uart_poll_schedule.h"
 #include <atomic>
 #include <cstring>
 #include "time_sync.h"
@@ -35,6 +37,7 @@ static SemaphoreHandle_t g_mutex = nullptr;
 static time_t g_capturedEpoch = 0;
 static uint32_t g_lastStartedAt = 0;
 static bool g_hasStarted = false;
+static uint32_t g_lastStatusStartedAt = 0;
 static CounterProtocol::Reading g_latest;
 static bool g_latestValid = false;
 static bool g_machineStatusValid = false;
@@ -53,8 +56,6 @@ static constexpr char STATUS_REQUEST[] = "*1,E,r,1,0,5B\r";
 static constexpr char RINSE_REQUEST[] = "*1,D,w,1,100,5E\r";
 static bool g_isStatus = MACHINE_STATUS_PROBE;
 static bool g_resultIsStatus = false;
-static bool g_statusDue = false;
-static uint32_t g_counterFinishedAt = 0;
 static bool g_rinseLatched = false;
 static bool g_hasRinsed = false;
 static uint32_t g_lastRinseAt = 0;
@@ -117,10 +118,6 @@ static void finish(const char* status) {
       g_capturedEpoch = 0;
     }
     g_resultPending = true;
-#if !COUNTER_SERIAL_DIAGNOSTICS
-    g_statusDue = true;
-    g_counterFinishedAt = millis();
-#endif
   }
   g_isStatus = MACHINE_STATUS_PROBE;
   if (!g_resultIsStatus || MACHINE_STATUS_PROBE) {
@@ -193,6 +190,7 @@ bool begin() {
   if (!g_mutex) { g_uart->end(); return false; }
   g_ready = true;
   g_lastStartedAt = millis();
+  g_lastStatusStartedAt = g_lastStartedAt;
   g_hasStarted = true; // First automatic read waits one interval after init.
   if (xTaskCreatePinnedToCore(serialTask, "vending", 4096, nullptr, 2,
                                nullptr, 1) != pdPASS) {
@@ -210,31 +208,42 @@ int activeRxPin() { return g_rxPin; }
 int activeTxPin() { return g_txPin; }
 
 bool requestCounterRead() {
-  if (!g_ready) return false;
+  if (!g_ready || !g_mutex) return false;
+  StateLock lock;
   bool expected = false;
-  return g_requested.compare_exchange_strong(expected, true);
+  if (!g_requested.compare_exchange_strong(expected, true)) return false;
+  g_isStatus = MACHINE_STATUS_PROBE;
+  return true;
 }
 
 void loop() {
   StateLock lock;
   const uint32_t now = millis();
   if (!g_waiting && g_hasRinsed && now - g_lastRinseAt < 3000) return;
-  if (g_ready && g_pollingEnabled && !g_requested.load() &&
-      (!g_hasStarted || now - g_lastStartedAt >= COUNTER_POLL_INTERVAL_MS)) {
-    g_isStatus = MACHINE_STATUS_PROBE;
-    g_statusDue = false;
-    requestCounterRead();
-  }
-  if (g_statusDue && g_pollingEnabled && !g_requested.load() &&
-      now - g_counterFinishedAt >= 1500) {
-    g_statusDue = false;
-    g_isStatus = true;
-    requestCounterRead();
+  if (g_ready && g_pollingEnabled && !g_requested.load()) {
+    // One UART transaction at a time, with a quiet gap for delayed replies.
+    if (g_attemptSequence && now - g_finishedAt < 1500) return;
+    bool counterDue = !g_hasStarted || UartPollSchedule::due(
+        now, g_lastStartedAt, TelemetrySettings::counterIntervalMs.load());
+    bool statusDue = UartPollSchedule::due(
+        now, g_lastStatusStartedAt, TelemetrySettings::statusIntervalMs.load());
+#if COUNTER_SERIAL_DIAGNOSTICS
+    statusDue = false;
+#elif MACHINE_STATUS_PROBE
+    counterDue = false;
+#endif
+    const auto next = UartPollSchedule::next(counterDue, statusDue);
+    if (next != UartPollSchedule::Read::None) {
+      g_isStatus = next == UartPollSchedule::Read::Status;
+      g_requested.store(true);
+    }
   }
   if (!g_requested.load()) return;
   if (!g_waiting) {
     // Explicit BLE reads remain counter reads in the normal environment.
-    if (!g_isStatus || MACHINE_STATUS_PROBE) {
+    if (g_isStatus) {
+      g_lastStatusStartedAt = now;
+    } else {
       g_lastStartedAt = now;
       g_hasStarted = true;
     }

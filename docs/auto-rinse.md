@@ -5,8 +5,9 @@ by calling `VendingCommands(RINSE, "100")`. `Commands.java` builds the complete
 request `*1,D,w,1,100,5E\r` using XOR plus decimal 90; D,w,1 alone is incomplete.
 
 Bharat Pi acts on checksum-validated status level 1/code 24. Normal `esp32dev`
-reads counters every 10 seconds and queues a status read 1.5 seconds after each
-counter attempt. Status requests share the worker UART; they cannot overlap
+reads counters using MQTTPushCounterInterval (default 10 seconds) and independently
+reads status using MQTTPushInterval (default 5 seconds). Automatic reads have a
+1.5-second quiet gap. Status requests share the worker UART; they cannot overlap
 counter requests. Status replies do not invalidate the latest counter snapshot
 or replace a pending BLE counter result. `machine_status_probe` polls status
 directly and now also supports auto-rinse; it is no longer read-only.

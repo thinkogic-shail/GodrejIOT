@@ -7,6 +7,7 @@
 #include "cellular_manager.h"
 #include "time_sync.h"
 #include "telemetry_settings.h"
+#include "configuration_manager.h"
 #include <atomic>
 #include <ArduinoJson.h>
 #include "ble_text_framing.h"
@@ -121,6 +122,7 @@ static void loadMqttOrDefault(String& host, uint16_t& port, String& user, String
 static String buildStatusJson() {
   MachineInfo info;
   bool hasInfo = Storage::loadMachineInfo(info);
+  const auto configuration = ConfigurationManager::get();
 
   String json = "{";
   json += "\"cellularStatus\":\"" + String(CellularManager::status()) + "\",";
@@ -131,12 +133,22 @@ static String buildStatusJson() {
   json += (g_maintenanceMode ? "true" : "false");
   json += ",\"hasMachineInfo\":";
   json += (hasInfo ? "true" : "false");
+  json += ",\"diagnosticsEnabled\":" + String(TelemetrySettings::diagnosticsEnabled.load() ? "true" : "false");
+  json += ",\"MQTTPushInterval\":" + String(configuration.MQTTPushInterval);
+  json += ",\"MQTTPushCounterInterval\":" + String(configuration.MQTTPushCounterInterval);
+  json += ",\"MQTTStatisticsInterval\":" + String(configuration.MQTTStatisticsInterval);
+  json += ",\"ScreensaverInactiveTimeout\":" + String(configuration.ScreensaverInactiveTimeout);
+  json += ",\"diagnosticIntervalMs\":" + String(TelemetrySettings::diagnosticIntervalMs.load());
+  json += ",\"counterPollIntervalMs\":" + String(configuration.MQTTPushCounterInterval);
+  json += ",\"statusPollIntervalMs\":" + String(configuration.MQTTPushInterval);
   if (hasInfo) {
     json += ",\"MachineId\":" + String(info.MachineId);
     json += ",\"MachineName\":\"" + info.MachineName + "\"";
     json += ",\"CompanyName\":\"" + info.CompanyName + "\"";
     json += ",\"LocationName\":\"" + info.LocationName + "\"";
     json += ",\"VideoURL\":\"" + info.VideoURL + "\"";
+    json += ",\"MachineStatusInterval\":" + String(info.MachineStatusInterval);
+    json += ",\"MachineReadCounterInterval\":" + String(info.MachineReadCounterInterval);
   }
   json += "}";
   return json;
@@ -171,6 +183,7 @@ static String buildSettingsJson() {
   json += ",\"simApn\":\"" + apn + "\"";
   json += ",\"simCredentialsConfigured\":" + String(user.length() ? "true" : "false");
   json += ",\"simPinConfigured\":" + String(pin.length() ? "true" : "false");
+  json += ",\"diagnosticsEnabled\":" + String(TelemetrySettings::diagnosticsEnabled.load() ? "true" : "false");
   json += "}";
   return json;
 }

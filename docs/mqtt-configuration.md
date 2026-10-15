@@ -48,15 +48,26 @@ Only these fields currently affect operation:
 
 | Field | Publishing topic | Before first configuration |
 | --- | --- | --- |
-| MQTTPushInterval | godrej/sendstatus/<UniqueCode> | 5000 ms |
-| MQTTPushCounterInterval | godrej/sendcounter/<UniqueCode> | 10000 ms |
+| MQTTPushInterval | godrej/sendstatus/<UniqueCode> and UART machine-status polling | 5000 ms |
+| MQTTPushCounterInterval | godrej/sendcounter/<UniqueCode> and UART counter polling | 10000 ms |
 
 The example sets status publishing to 20 seconds and counters to 60 seconds.
 Changes apply immediately; intervals are measured against previous publish times.
 Counters publish the latest valid, unpublished reading once the interval elapses;
 the first fresh counter reading after startup can publish immediately. Failed
 counter publishes retry at most once per second. Missing/invalid UART readings
-can delay publishing; these settings do not change UART polling frequency.
+can delay publishing. MQTTPushCounterInterval also controls UART counter polling,
+and GET reports that same runtime value as counterPollIntervalMs. Changes apply
+to the next scheduling check without interrupting an in-flight UART transaction.
+Machine-status polling independently uses MQTTPushInterval. Changing the counter
+interval does not change status polling or publishing. GET exposes that interval
+as statusPollIntervalMs. UART transactions remain serialized, with a 1500 ms quiet
+gap between automatic reads; busy UART, response timeouts, or the post-rinse pause
+can delay a due read. When both reads are due, counters take priority. Machine-status
+reads wait until the counter transaction completes and the quiet gap passes;
+their timestamp is not advanced while deferred. An active status read finishes
+before a newly due counter starts. Very short counter intervals can keep status
+reads deferred while counters remain overdue.
 The remaining configuration fields are stored for future use.
 
 Diagnostics keep their separate 1000 ms interval and default to disabled on every
